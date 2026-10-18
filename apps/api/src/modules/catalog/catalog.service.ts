@@ -31,6 +31,12 @@ export interface UpdateProductInput {
   isActive?: boolean;
   priceMinor?: number;
   costMinor?: number;
+  /**
+   * The full desired barcode set. When present the server replaces this product's barcodes with
+   * exactly these values, so a barcode can be added or removed after the product exists — a new
+   * product is no longer the only way to make an item scannable.
+   */
+  barcodes?: string[];
   expectedVersion?: number;
 }
 
@@ -220,6 +226,35 @@ export class CatalogService {
         })
         .where('id', '=', productId)
         .execute();
+
+      // Replace the barcode set when the caller supplied one (item 4.1). A barcode belongs to one
+      // tenant exactly once, so a clash with a *different* product is a conflict, not a silent move.
+      if (input.barcodes !== undefined) {
+        const desired = [...new Set(input.barcodes.map((b) => b.trim()).filter((b) => b.length > 0))];
+        if (desired.length > 0) {
+          const clash = await trx
+            .selectFrom('barcodes')
+            .select(['barcode', 'product_id'])
+            .where('tenant_id', '=', tenantId)
+            .where('barcode', 'in', desired)
+            .where('product_id', '!=', productId)
+            .executeTakeFirst();
+          if (clash) throw AppError.conflict('DUPLICATE_BARCODE', `Barcode ${clash.barcode} already belongs to another product`);
+        }
+        const stale = trx.deleteFrom('barcodes').where('tenant_id', '=', tenantId).where('product_id', '=', productId);
+        if (desired.length > 0) {
+          await stale.where('barcode', 'not in', desired).execute();
+        } else {
+          await stale.execute();
+        }
+        for (const barcode of desired) {
+          await trx
+            .insertInto('barcodes')
+            .values({ tenant_id: tenantId, product_id: productId, barcode })
+            .onConflict((oc) => oc.columns(['tenant_id', 'barcode']).doNothing())
+            .execute();
+        }
+      }
 
       const after = await this.productPayload(trx, tenantId, productId);
       await this.events.audit(trx, {

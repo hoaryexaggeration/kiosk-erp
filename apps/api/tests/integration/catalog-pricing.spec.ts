@@ -71,6 +71,44 @@ describe('catalogue + price resolution (Phase 4)', () => {
     expect(stale.body.code).toBe('VERSION_MISMATCH');
   });
 
+  it('adds, replaces and removes barcodes on an existing product (item 4.1)', async () => {
+    const created = await auth(request(app.getHttpServer()).post('/v1/products')).send({
+      sku: 'PH4-BC-1',
+      name: 'Barcode edit product',
+      taxCategoryId: SEED.taxCategoryId,
+      priceMinor: 900,
+      barcodes: ['PH4BC01'],
+    });
+    const id = created.body.id as string;
+
+    // Adding a barcode keeps the existing one.
+    const added = await auth(request(app.getHttpServer()).patch(`/v1/products/${id}`)).send({ barcodes: ['PH4BC01', 'PH4BC02'] });
+    expect(added.status).toBe(200);
+    expect(added.body.barcodes).toEqual(['PH4BC01', 'PH4BC02']);
+
+    // The added barcode resolves, so the item is scannable without recreating it.
+    const lookup = await auth(request(app.getHttpServer()).get('/v1/barcodes/PH4BC02'));
+    expect(lookup.status).toBe(200);
+    expect(lookup.body.id).toBe(id);
+
+    // Replacing is a set operation: the removed barcode stops resolving entirely.
+    const replaced = await auth(request(app.getHttpServer()).patch(`/v1/products/${id}`)).send({ barcodes: ['PH4BC03'] });
+    expect(replaced.body.barcodes).toEqual(['PH4BC03']);
+    const gone = await auth(request(app.getHttpServer()).get('/v1/barcodes/PH4BC01'));
+    expect(gone.status).toBe(404);
+
+    // A barcode owned by another product is a conflict, never a silent steal.
+    const clash = await auth(request(app.getHttpServer()).patch(`/v1/products/${id}`)).send({ barcodes: ['6001000000011'] });
+    expect(clash.status).toBe(409);
+    expect(clash.body.code).toBe('DUPLICATE_BARCODE');
+    const stillThere = await auth(request(app.getHttpServer()).get('/v1/barcodes/6001000000011'));
+    expect(stillThere.body.id).toBe(SEED.productA);
+
+    // Clearing every barcode is allowed.
+    const cleared = await auth(request(app.getHttpServer()).patch(`/v1/products/${id}`)).send({ barcodes: [] });
+    expect(cleared.body.barcodes).toEqual([]);
+  });
+
   it('pushes a product delta to devices as a server event', async () => {
     const events = await dbs.db
       .selectFrom('server_events')

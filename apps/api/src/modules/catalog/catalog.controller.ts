@@ -28,6 +28,8 @@ const UpdateProductSchema = z.object({
   isActive: z.boolean().optional(),
   priceMinor: z.number().int().nonnegative().optional(),
   costMinor: z.number().int().nonnegative().optional(),
+  /** The full desired barcode set for this product; the server replaces what is stored. */
+  barcodes: z.array(z.string().min(1).max(64)).max(20).optional(),
   expectedVersion: z.number().int().positive().optional(),
 });
 

@@ -121,7 +121,7 @@ must be completed when its target phase is reached.
 | D7b | Till blocks a sale that would take stock negative; `UNCOSTED_STOCK` resolution path | §18.5 | 5 | ☐ |
 | D7c | Branch edge gateway (ADR 0010) — new MVP component | §6, §17 | 5–11 | ☐ |
 | D8 | Low-stock/reorder thresholds + alerts | §3.D | 4 | ☐ |
-| D9 | Editing barcodes on an existing product (`PATCH /v1/products/:id`) | §3.C | 4 | ☐ |
+| D9 | Editing barcodes on an existing product (`PATCH /v1/products/:id`) | §3.C | 4 ✔ | ✔ |
 | D10 | Cashier session + role gate on the till | §15 Ph5 | 5 | ☐ |
 | D11 | Discounts (line/order), price override with permission, customer on sale, notes | §3.B, §15 Ph5 | 5 | ☐ |
 | D12 | Held/resumed sales and void-before-finalisation | §15 Ph5 | 5 | ☐ |
@@ -155,7 +155,7 @@ each later phase is expanded to the same granularity as it becomes current.
 | # | Item | Exit criterion |
 |---|---|---|
 | 4.0 ✔ | **FIFO valuation layers** (ADR 0009, replaces weighted average) | Done: layers + cost allocations + `cogs_minor`, `GET /v1/inventory/valuation`, override rule for negative adjustments, seeded opening stock. 29/29 API tests pass |
-| 4.1 | `PATCH /v1/products/:id` accepts `barcodes`; device replaces that product's barcodes transactionally (D9) | A barcode added on the server resolves on a device after sync; removed barcodes stop resolving |
+| 4.1 ✔ | `PATCH /v1/products/:id` accepts `barcodes`; device replaces that product's barcodes transactionally (D9) | Done: set semantics, `DUPLICATE_BARCODE` conflict, barcode resolves immediately after the change |
 | 4.2 | Product management UI: list/search, create, edit, deactivate; barcodes, category, tax category, unit, cost, price | A product created on the phone reaches the server and back without hand-editing SQL |
 | 4.3 | Category + tax-category management UI | Same |
 | 4.4 | Bulk import: CSV/JSON upload → **preview → validation → per-row error report → commit** (D2) | A malformed file creates **no partial records** and reports every bad row |
