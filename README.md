@@ -50,8 +50,8 @@ kiosk-erp/
 | 1 | Domain contracts + fixtures | ✅ `packages/domain-fixtures` (34 checks), sync protocol spec |
 | 2 | Backend foundation | ✅ NestJS API, Postgres migrations, auth/RBAC, devices, catalog, licensing (JWS ES256) |
 | 3 | Android shell, local DB, sync center | ✅ APK `artifacts/retail-erp-p03-v0.3.0.apk`; see `docs/operations/phase-03-apk-record.md` |
-| 4 | Catalogue, pricing/promotions, inventory | ✅ APK `artifacts/retail-erp-p04-v0.4.0.apk`; multi-module split (ADR 0007); see `docs/operations/phase-04-apk-record.md` |
-| 5–12 | Full POS → release candidate | ⏳ planned |
+| 4 | Catalogue, pricing/promotions, inventory | ✅ APK `artifacts/retail-erp-p04-v0.4.1.apk`; multi-module split (ADR 0007); launcher icon + nav cleanup; see `docs/operations/phase-04-apk-record.md` |
+| 5–12 | Full POS → release candidate | ⏳ planned (see `docs/operations/roadmap.md`) |
 | 13 | Native iOS client | ⏳ scaffolded in `apps/ios/` |
 
 Verified locally: 26/26 API tests (unit + integration against Docker Postgres) and 34/34 fixture
@@ -81,7 +81,8 @@ npm run android:build      # writes artifacts/retail-erp-pXX-*.apk
 - `docs/architecture/adr/` — architecture decision records
 - `docs/architecture/sync-protocol.md` — command envelope, push/pull, idempotency, conflicts
 - `docs/accounting/posting-matrix.md` — double-entry posting rules (draft, accountant sign-off required)
-- `docs/operations/` — backup, recovery and sync-conflict runbooks
+- `docs/operations/` — backup, recovery and sync-conflict runbooks; per-phase APK records
+- `docs/operations/roadmap.md` — phase checklist (5→13) and the standing verification gate
 
 ## Design rules (non-negotiable)
 

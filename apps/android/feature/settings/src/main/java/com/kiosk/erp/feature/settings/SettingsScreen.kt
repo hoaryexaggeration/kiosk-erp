@@ -2,11 +2,14 @@ package com.kiosk.erp.feature.settings
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Button
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -17,7 +20,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 
 @Composable
-fun SettingsScreen(vm: SettingsViewModel) {
+fun SettingsScreen(
+    vm: SettingsViewModel,
+    onOpenCatalog: () -> Unit = {},
+    onOpenLicense: () -> Unit = {},
+) {
     val state by vm.state.collectAsState()
     Column(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Text("Device & Sync Setup", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
@@ -34,6 +41,14 @@ fun SettingsScreen(vm: SettingsViewModel) {
         OutlinedTextField(state.deviceId, { v -> vm.update { it.copy(deviceId = v) } }, label = { Text("Device id (UUID, generated)") }, modifier = Modifier.fillMaxWidth())
         Button(onClick = { vm.setup() }, modifier = Modifier.fillMaxWidth()) { Text(if (state.configured) "Re-run setup" else "Enroll this device") }
         state.message?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+
+        HorizontalDivider(Modifier.padding(vertical = 4.dp))
+        Text("Administration", style = MaterialTheme.typography.titleMedium)
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(onClick = onOpenCatalog) { Text("Catalogue") }
+            OutlinedButton(onClick = onOpenLicense) { Text("License & plan") }
+        }
+
         Text("Device clock & permissions are not trusted for financial ordering; the server assigns canonical order.", style = MaterialTheme.typography.bodySmall)
     }
 }

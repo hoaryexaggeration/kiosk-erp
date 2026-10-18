@@ -22,8 +22,8 @@ android {
         applicationId = "com.kiosk.erp"
         minSdk = 26
         targetSdk = 34
-        versionCode = 4
-        versionName = "0.4.0"
+        versionCode = 5
+        versionName = "0.4.1"
         // Local dev backend; override per environment.
         buildConfigField("String", "DEFAULT_API_BASE_URL", "\"http://10.0.2.2:3000/v1\"")
     }

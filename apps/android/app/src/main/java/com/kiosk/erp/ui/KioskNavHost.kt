@@ -3,11 +3,9 @@ package com.kiosk.erp.ui
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Dashboard
-import androidx.compose.material.icons.filled.Inventory2
 import androidx.compose.material.icons.filled.PointOfSale
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Sync
-import androidx.compose.material.icons.filled.VerifiedUser
 import androidx.compose.material.icons.filled.Warehouse
 import androidx.compose.material3.Icon
 import androidx.compose.material3.NavigationBar
@@ -32,16 +30,25 @@ import com.kiosk.erp.feature.pos.PosScreen
 import com.kiosk.erp.feature.settings.SettingsScreen
 import com.kiosk.erp.feature.sync.SyncCenterScreen
 
+/**
+ * Primary destinations only. Material's NavigationBar is designed for 3–5 items, so Catalogue and
+ * License — which are occasional, administrative screens — are reached from the Setup hub instead of
+ * getting their own tab. This keeps the cashier's core loop (Home, POS, Stock, Sync) uncluttered.
+ */
 private data class Tab(val route: String, val label: String, val icon: ImageVector)
 
 private val tabs = listOf(
     Tab("dashboard", "Home", Icons.Filled.Dashboard),
     Tab("pos", "POS", Icons.Filled.PointOfSale),
-    Tab("catalog", "Catalogue", Icons.Filled.Inventory2),
     Tab("inventory", "Stock", Icons.Filled.Warehouse),
     Tab("sync", "Sync", Icons.Filled.Sync),
-    Tab("license", "License", Icons.Filled.VerifiedUser),
     Tab("settings", "Setup", Icons.Filled.Settings),
+)
+
+/** Non-tab routes and the tab that owns them, so the bar stays highlighted while browsing them. */
+private val ownedByTab = mapOf(
+    "catalog" to "settings",
+    "license" to "settings",
 )
 
 @Composable
@@ -49,6 +56,7 @@ fun KioskNavHost(container: AppContainer) {
     val navController = rememberNavController()
     val backStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = backStackEntry?.destination?.route
+    val selectedRoute = currentRoute?.let { ownedByTab[it] ?: it }
     val factory = KioskViewModelFactory(container)
 
     Scaffold(
@@ -56,7 +64,7 @@ fun KioskNavHost(container: AppContainer) {
             NavigationBar {
                 tabs.forEach { tab ->
                     NavigationBarItem(
-                        selected = currentRoute == tab.route,
+                        selected = selectedRoute == tab.route,
                         onClick = {
                             navController.navigate(tab.route) {
                                 popUpTo("dashboard") { inclusive = tab.route == "dashboard" }
@@ -77,11 +85,17 @@ fun KioskNavHost(container: AppContainer) {
         ) {
             composable("dashboard") { DashboardScreen(viewModel(factory = factory)) }
             composable("pos") { PosScreen(viewModel(factory = factory)) }
-            composable("catalog") { CatalogScreen(viewModel(factory = factory)) }
             composable("inventory") { InventoryScreen(viewModel(factory = factory)) }
             composable("sync") { SyncCenterScreen(viewModel(factory = factory)) }
+            composable("settings") {
+                SettingsScreen(
+                    vm = viewModel(factory = factory),
+                    onOpenCatalog = { navController.navigate("catalog") },
+                    onOpenLicense = { navController.navigate("license") },
+                )
+            }
+            composable("catalog") { CatalogScreen(viewModel(factory = factory)) }
             composable("license") { LicenseScreen(viewModel(factory = factory)) }
-            composable("settings") { SettingsScreen(viewModel(factory = factory)) }
         }
     }
 }

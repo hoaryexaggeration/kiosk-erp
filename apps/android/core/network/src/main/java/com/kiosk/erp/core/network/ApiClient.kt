@@ -125,7 +125,7 @@ class ApiClient {
                 put("name", name)
                 put("platform", "android")
                 put("isOfflineAuthoritative", true)
-                put("appVersion", "0.4.0")
+                put("appVersion", "0.4.1")
             }
             post(baseUrl, "devices/enroll", token, body)
         }

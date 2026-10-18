@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Launcher foreground: a receipt with a torn bottom edge — the POS/retail motif.
+  Adaptive-icon canvas is 108x108 with a 66dp safe zone, so the glyph stays within ~36..72.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Receipt body -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M36,30 L72,30 L72,78 L66,74 L60,78 L54,74 L48,78 L42,74 L36,78 Z" />
+
+    <!-- Printed lines, cut back to the background colour -->
+    <path
+        android:strokeColor="#0F766E"
+        android:strokeWidth="3"
+        android:strokeLineCap="round"
+        android:pathData="M42,42 L66,42" />
+    <path
+        android:strokeColor="#0F766E"
+        android:strokeWidth="3"
+        android:strokeLineCap="round"
+        android:pathData="M42,52 L66,52" />
+    <path
+        android:strokeColor="#0F766E"
+        android:strokeWidth="3"
+        android:strokeLineCap="round"
+        android:pathData="M42,62 L58,62" />
+</vector>

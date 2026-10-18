@@ -4,10 +4,10 @@ Required by §15 "Mandatory Android APK delivery gate". Every field below is par
 
 | Field | Value |
 |---|---|
-| **Phase** | 4 — Catalogue, pricing/promotions and inventory |
-| **App version** | `0.4.0` (versionCode 4) |
-| **Artifact** | `artifacts/retail-erp-p04-v0.4.0.apk` |
-| **SHA-256** | `05a0660813619d8c9b0cca97802555814ad12f48dd8f8ec374b838d3e12fe512` |
+| **Phase** | 4 — Catalogue, pricing/promotions and inventory (+ post-phase polish) |
+| **App version** | `0.4.1` (versionCode 5) |
+| **Artifact** | `artifacts/retail-erp-p04-v0.4.1.apk` |
+| **SHA-256** | `74caefeab641af20b08eb039759629072eaf9981adf0b2a08cb1489e7ef3b108` |
 | **Size** | ~17.9 MB |
 | **Signing** | **Stable internal-test key** (`CN=Kiosk ERP Internal Test`, cert SHA-256 `935c0fbc6993db9ca761b4c3610c71a50d91897fd9b1753d0da3e56dffd056dd`), generated once by `build-apk.sh` and git-ignored (ADR 0005) |
 | **Build** | Docker image `kiosk-erp-android-builder` (JDK 17 + Android SDK 34 + Gradle 8.7); `PHASE=04 VERSION=0.4.0 bash infra/docker/android/build-apk.sh` |
@@ -60,6 +60,16 @@ Android (`apps/android`):
 - Product cache is populated from synced tax categories instead of a hard-coded rate.
 - `ApiClient` returns typed auth results, so feature modules no longer parse raw JSON.
 
+Post-phase polish (owner-requested, `docs/operations/roadmap.md` P1–P2):
+
+- **Launcher icon added.** There was none, so Android was showing its default robot. Now an adaptive
+  icon (teal background + white receipt mark, with a `monochrome` layer for themed icons), referenced
+  from the manifest as `icon` and `roundIcon`.
+- **Bottom navigation cleaned up.** Seven tabs exceeded Material's 3–5 guidance, so the two occasional
+  administrative screens (**Catalogue**, **License**) moved behind the **Setup** hub. Primary tabs are
+  now **Home · POS · Stock · Sync · Setup**, with the bar staying highlighted while browsing an
+  admin screen.
+
 ## Verification
 
 - `npm --workspace apps/api run test`: **26/26** pass (unit + integration against Docker Postgres),
@@ -75,8 +85,6 @@ Android (`apps/android`):
 ## Known limitations (phase-scoped)
 
 - Signed with an **internal-test** key (not a store key); fine for owner testing, not for distribution.
-- Seven bottom-nav tabs is one beyond the Material recommendation; a grouped navigation refinement
-  (Catalogue ⇄ Stock) is queued for Phase 5.
 - Receipts are touch-entry only; camera barcode scanning and printer adapters remain Phase 5.
 - No shift/session screen yet (Phase 6); `cashSessionId` is nullable.
 - Adjustments support a single line per command in the UI (the server accepts multi-line).
@@ -91,6 +99,8 @@ Android (`apps/android`):
 |---|---|---|
 | 1 | Uninstall the Phase 3 build, install this one, launch (no startup crash) | ☐ |
 | 1b | From Phase 4 onward: install a later build **over** this one and confirm local data is kept | ☐ |
+| 1c | The app appears in the launcher with its **own icon** (teal receipt), not the Android robot | ☐ |
+| 1d | Bottom bar shows five tabs (Home · POS · Stock · Sync · Setup); Catalogue and License open from Setup and the bar keeps Setup highlighted | ☐ |
 | 2 | Catalogue: **Refresh from server** → product list shows real prices | ☐ |
 | 3 | Stock tab: **Refresh balances** → seeded on-hand appears | ☐ |
 | 4 | Stock tab: apply `-2` with reason `shrinkage` → "Queued … waiting to sync"; an empty reason is refused | ☐ |
