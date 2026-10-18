@@ -39,13 +39,24 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.ui.platform.LocalContext
+import android.content.Context
+import android.net.Uri
+import android.provider.OpenableColumns
 import com.kiosk.erp.core.common.Pricing
 import com.kiosk.erp.core.database.ProductEntity
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /** A row in a simple dropdown picker (Material3's exposed dropdown menu is still experimental). */
 private data class PickerOption(val label: String, val onClick: () -> Unit)
@@ -56,10 +67,25 @@ fun CatalogScreen(vm: CatalogViewModel) {
     val query by vm.query.collectAsState()
     val meta by vm.meta.collectAsState()
     val editor by vm.editor.collectAsState()
+    val importState by vm.importState.collectAsState()
     var managing by remember { mutableStateOf(false) }
+
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            scope.launch {
+                val text = withContext(Dispatchers.IO) {
+                    runCatching { context.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() } }.getOrNull()
+                }
+                if (text == null) vm.importReadFailed() else vm.analyseImport(displayName(context, uri), text)
+            }
+        }
+    }
 
     when {
         editor != null -> ProductEditorScreen(editor = editor!!, meta = meta, vm = vm)
+        importState != null -> ImportPreviewScreen(state = importState!!, vm = vm)
         managing -> ManageCatalogueScreen(meta = meta, onBack = { managing = false }, vm = vm)
         else -> CatalogueListScreen(
             products = products,
@@ -71,10 +97,20 @@ fun CatalogScreen(vm: CatalogViewModel) {
             onToggleActive = vm::setActive,
             onRefresh = vm::refreshFromServer,
             onManage = { managing = true },
+            onImport = { filePicker.launch(IMPORT_MIME_TYPES) },
             onDismissMessage = vm::clearMessage,
         )
     }
 }
+
+/** Most CSV files arrive as `text/csv`; JSON is accepted too, via the same column vocabulary. */
+private val IMPORT_MIME_TYPES = arrayOf("text/*", "application/json", "application/vnd.ms-excel")
+
+private fun displayName(context: Context, uri: Uri): String = runCatching {
+    context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+        if (cursor.moveToFirst()) cursor.getString(0) else null
+    }
+}.getOrNull() ?: uri.lastPathSegment ?: "import"
 
 // --- list ----------------------------------------------------------------------------------------
 
@@ -89,6 +125,7 @@ private fun CatalogueListScreen(
     onToggleActive: (ProductEntity, Boolean) -> Unit,
     onRefresh: () -> Unit,
     onManage: () -> Unit,
+    onImport: () -> Unit,
     onDismissMessage: () -> Unit,
 ) {
     Column(Modifier.fillMaxSize().padding(16.dp)) {
@@ -118,6 +155,12 @@ private fun CatalogueListScreen(
                 TextButton(onClick = onDismissMessage) { Text("Dismiss") }
             }
         }
+        OutlinedButton(onClick = onImport) { Text("Import file (CSV or JSON)") }
+        Text(
+            "Loading a whole catalogue? Import a file: it is validated in full first, and a file with " +
+                "any bad row writes nothing.",
+            style = MaterialTheme.typography.bodySmall,
+        )
         if (!meta.online) {
             Text(
                 "Offline: the list below still works from the cache, but creating or editing a product needs a connection.",
@@ -321,6 +364,112 @@ private fun PickerField(label: String, selectedLabel: String?, options: List<Pic
             DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
                 options.forEach { option ->
                     DropdownMenuItem(text = { Text(option.label) }, onClick = { option.onClick(); expanded = false })
+                }
+            }
+        }
+    }
+}
+
+// --- bulk import (item 4.4) -----------------------------------------------------------------------
+
+@Composable
+private fun ImportPreviewScreen(state: ImportState, vm: CatalogViewModel) {
+    val report = state.report
+    Column(Modifier.fillMaxSize().padding(16.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = vm::cancelImport) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back") }
+            Column(Modifier.weight(1f)) {
+                Text("Import ${state.fileName}", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                Text("Validated by the server — nothing has been written yet.", style = MaterialTheme.typography.bodySmall)
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+
+        when {
+            state.analysing -> Text("Checking the file…", style = MaterialTheme.typography.bodyMedium)
+            state.error != null -> Text(state.error, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium)
+            report == null -> Text("No report yet.", style = MaterialTheme.typography.bodyMedium)
+            else -> {
+                Text(
+                    "${report.rowCount} rows • ${report.validCount} ready • ${report.errorCount} problem(s)",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Text(
+                    "${report.createCount} new, ${report.updateCount} updated" +
+                        if (report.categoriesToCreate.isEmpty()) "" else " • categories to create: ${report.categoriesToCreate.joinToString(", ")}",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                if (!report.isValid) {
+                    Text(
+                        "This file has problems, so committing it would write nothing. Fix the rows below " +
+                            "and choose the file again.",
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+                if (report.categoriesToCreate.isNotEmpty()) {
+                    SwitchRow(
+                        "Create the missing categories",
+                        "Categories are labels; a missing tax rate is always an error.",
+                        state.createMissingCategories,
+                    ) { vm.setImportCreateMissingCategories(it) }
+                }
+                Spacer(Modifier.height(8.dp))
+
+                LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp), contentPadding = PaddingValues(bottom = 16.dp), modifier = Modifier.weight(1f)) {
+                    if (report.errors.isNotEmpty()) {
+                        item { Text("Problems", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold) }
+                        items(report.errors, key = { "${it.line}:${it.code}:${it.field}" }) { error ->
+                            Card(Modifier.fillMaxWidth()) {
+                                Column(Modifier.padding(12.dp)) {
+                                    Text(
+                                        "Line ${error.line}" + (error.sku?.let { " • $it" } ?: "") + (error.field?.let { " • $it" } ?: ""),
+                                        fontWeight = FontWeight.SemiBold,
+                                    )
+                                    Text(error.message, style = MaterialTheme.typography.bodySmall)
+                                    Text(error.code, style = MaterialTheme.typography.labelSmall)
+                                }
+                            }
+                        }
+                    }
+                    if (report.preview.isNotEmpty()) {
+                        item { Text("Will be applied", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold) }
+                        items(report.preview, key = { it.line }) { row ->
+                            Card(Modifier.fillMaxWidth()) {
+                                Row(Modifier.padding(12.dp).fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                    Column(Modifier.weight(1f)) {
+                                        Text("${row.sku} — ${row.name}", fontWeight = FontWeight.SemiBold)
+                                        Text("line ${row.line} • ${row.unit}", style = MaterialTheme.typography.bodySmall)
+                                    }
+                                    Column {
+                                        Text(Pricing.formatMinor(row.priceMinor), fontFamily = FontFamily.Monospace)
+                                        Text(if (row.action == "create") "new" else "update", style = MaterialTheme.typography.labelSmall)
+                                    }
+                                }
+                            }
+                        }
+                        if (report.previewTruncated) {
+                            item { Text("…and more rows not shown.", style = MaterialTheme.typography.bodySmall) }
+                        }
+                    }
+                }
+
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(
+                        onClick = vm::commitImport,
+                        enabled = report.isValid && !state.committing,
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Text(
+                            when {
+                                state.committing -> "Importing…"
+                                !report.isValid -> "Nothing to commit"
+                                else -> "Commit ${report.createCount + report.updateCount} products"
+                            },
+                        )
+                    }
+                    OutlinedButton(onClick = vm::cancelImport, modifier = Modifier.weight(1f)) { Text("Cancel") }
                 }
             }
         }

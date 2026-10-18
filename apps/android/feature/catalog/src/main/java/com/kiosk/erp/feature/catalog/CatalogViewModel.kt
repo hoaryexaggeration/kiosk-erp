@@ -8,6 +8,8 @@ import com.kiosk.erp.core.data.session.SessionStore
 import com.kiosk.erp.core.database.ProductEntity
 import com.kiosk.erp.core.network.ApiClient
 import com.kiosk.erp.core.network.ApiException
+import com.kiosk.erp.core.network.ImportReport
+import com.kiosk.erp.core.network.ImportSource
 import com.kiosk.erp.core.network.ProductDraft
 import com.kiosk.erp.core.network.ServerCategory
 import com.kiosk.erp.core.network.ServerTaxCategory
@@ -61,6 +63,22 @@ data class CatalogMeta(
     val message: String? = null,
 )
 
+/**
+ * A bulk import in progress. The file text is held as it arrived — not re-serialised — so what the
+ * server validates in the preview is byte-for-byte what a commit sends. Toggling
+ * `createMissingCategories` re-runs the preview, because it changes which rows are valid and the
+ * operator must approve the same report that the commit will act on.
+ */
+data class ImportState(
+    val fileName: String,
+    val source: ImportSource,
+    val report: ImportReport? = null,
+    val analysing: Boolean = false,
+    val committing: Boolean = false,
+    val error: String? = null,
+    val createMissingCategories: Boolean = false,
+)
+
 @OptIn(ExperimentalCoroutinesApi::class, FlowPreview::class)
 class CatalogViewModel(
     private val productRepository: ProductRepository,
@@ -81,6 +99,9 @@ class CatalogViewModel(
 
     private val _editor = MutableStateFlow<ProductEditorState?>(null)
     val editor: StateFlow<ProductEditorState?> = _editor.asStateFlow()
+
+    private val _import = MutableStateFlow<ImportState?>(null)
+    val importState: StateFlow<ImportState?> = _import.asStateFlow()
 
     init {
         loadMeta()
@@ -303,6 +324,64 @@ class CatalogViewModel(
         }
     }
 
+    // --- bulk import (item 4.4) ------------------------------------------------------------------
+
+    /** The file is validated by the SERVER, so a preview here is the real thing, not a local guess. */
+    fun analyseImport(fileName: String, text: String) {
+        _import.value = ImportState(fileName = fileName, source = ImportSource.detect(fileName, text))
+        runImport(commit = false)
+    }
+
+    fun setImportCreateMissingCategories(value: Boolean) {
+        val current = _import.value ?: return
+        _import.value = current.copy(createMissingCategories = value)
+        runImport(commit = false)
+    }
+
+    fun commitImport() {
+        runImport(commit = true)
+    }
+
+    fun cancelImport() {
+        _import.value = null
+    }
+
+    fun importReadFailed() {
+        _meta.value = _meta.value.copy(message = "Could not read that file")
+    }
+
+    private fun runImport(commit: Boolean) {
+        val current = _import.value ?: return
+        viewModelScope.launch {
+            _import.value = current.copy(analysing = !commit, committing = commit, error = null)
+            val session = sessionStore.current()
+            if (!session.isAuthenticated) {
+                _import.value = current.copy(analysing = false, committing = false, error = "Sign in first (Setup) to import a catalogue")
+                return@launch
+            }
+            runCatching {
+                api.importProducts(session.apiBaseUrl, session.accessToken!!, current.source, commit, current.createMissingCategories)
+            }
+                .onSuccess { report ->
+                    if (commit && report.isValid) {
+                        // Refresh the cache so the imported products are visible and scannable straight away.
+                        runCatching { api.serverProducts(session.apiBaseUrl, session.accessToken!!) }
+                            .onSuccess { productRepository.refreshProducts(it) }
+                        _import.value = null
+                        _meta.value = _meta.value.copy(
+                            message = "Imported ${report.createCount} new and ${report.updateCount} updated products",
+                            online = true,
+                        )
+                    } else {
+                        _import.value = current.copy(report = report, analysing = false, committing = false)
+                    }
+                }
+                .onFailure { failure ->
+                    _import.value = current.copy(analysing = false, committing = false, error = describe(failure))
+                }
+        }
+    }
+
     /** Server rejections carry a machine code; translate the ones an operator can act on. */
     private fun describe(failure: Throwable): String {
         val api = failure as? ApiException
@@ -312,6 +391,7 @@ class CatalogViewModel(
             "DUPLICATE_BARCODE" -> "That barcode belongs to another product"
             "VERSION_MISMATCH" -> "Someone else changed this product first — reopen it and try again"
             "FORBIDDEN" -> "Your role cannot change the catalogue"
+            "INVALID_IMPORT_FILE" -> detail
             null -> "Could not reach the server ($detail)"
             else -> "$detail (${api.code})"
         }

@@ -108,6 +108,64 @@ data class ServerMovement(
     val occurredAt: String,
 )
 
+/** One rejected row of a bulk import, pointing at the line the operator sees in their file. */
+data class ImportRowError(
+    val line: Int,
+    val sku: String?,
+    val field: String?,
+    val code: String,
+    val message: String,
+)
+
+data class ImportPreviewRow(
+    val line: Int,
+    val action: String,
+    val sku: String,
+    val name: String,
+    val priceMinor: Long,
+    val unit: String,
+)
+
+/**
+ * The result of a bulk import. A file with errors answers 200 with this report: a preview that found
+ * problems is a successful preview, not a failed request. `invalid` means nothing was written.
+ */
+data class ImportReport(
+    val status: String,
+    val rowCount: Int,
+    val validCount: Int,
+    val errorCount: Int,
+    val createCount: Int,
+    val updateCount: Int,
+    val categoriesToCreate: List<String> = emptyList(),
+    val errors: List<ImportRowError> = emptyList(),
+    val preview: List<ImportPreviewRow> = emptyList(),
+    val previewTruncated: Boolean = false,
+) {
+    val isValid: Boolean get() = errorCount == 0
+}
+
+/**
+ * The file an operator picked, kept as text. CSV and JSON use the same column vocabulary on the
+ * server, so the only difference here is how the bytes are framed — never re-serialised, so what the
+ * server validates in a preview is exactly what a commit sends.
+ */
+sealed interface ImportSource {
+    val text: String
+
+    data class Csv(override val text: String) : ImportSource
+    data class Json(override val text: String) : ImportSource
+
+    companion object {
+        /** A `.json` name or a JSON-looking first character; everything else is treated as CSV. */
+        fun detect(fileName: String, text: String): ImportSource {
+            val head = text.trimStart().firstOrNull()
+            val looksJson = fileName.trim().lowercase().endsWith(".json") || head == '[' || head == '{'
+            return if (looksJson) Json(text) else Csv(text)
+        }
+    }
+}
+
 /**
  * Thin REST client for the sync/control plane. Reads are always satisfied from the local
  * database first; this client only pushes commands and pulls deltas (§5).
@@ -342,6 +400,72 @@ class ApiClient {
             )
         } ?: emptyList()
     }
+
+    /**
+     * Bulk catalogue import (item 4.4). `commit = false` is a pure preview: the server validates the
+     * whole file and writes nothing, so the device can show exactly what a commit would do before
+     * asking for it.
+     */
+    suspend fun importProducts(
+        baseUrl: String,
+        token: String,
+        source: ImportSource,
+        commit: Boolean,
+        createMissingCategories: Boolean,
+    ): ImportReport = withContext(Dispatchers.IO) {
+        val body = buildJsonObject {
+            when (source) {
+                is ImportSource.Csv -> put("csv", source.text)
+                is ImportSource.Json -> put("records", recordsOf(source.text))
+            }
+            put("commit", commit)
+            put("createMissingCategories", createMissingCategories)
+        }
+        post(baseUrl, "products/import", token, body).jsonObject.toImportReport()
+    }
+
+    /** A JSON file is either an array of records or an object wrapping one in `records`. */
+    private fun recordsOf(text: String): JsonArray {
+        val element = runCatching { json.parseToJsonElement(text) }.getOrNull()
+            ?: throw ApiException(0, "INVALID_IMPORT_FILE", "That file is not valid JSON")
+        return when (element) {
+            is JsonArray -> element
+            is JsonObject -> element["records"] as? JsonArray ?: throw ApiException(0, "INVALID_IMPORT_FILE", "A JSON import must be an array of records")
+            else -> throw ApiException(0, "INVALID_IMPORT_FILE", "A JSON import must be an array of records")
+        }
+    }
+
+    private fun JsonObject.toImportReport(): ImportReport = ImportReport(
+        status = this["status"]?.jsonPrimitive?.content ?: "invalid",
+        rowCount = this["rowCount"]?.jsonPrimitive?.content?.toIntOrNull() ?: 0,
+        validCount = this["validCount"]?.jsonPrimitive?.content?.toIntOrNull() ?: 0,
+        errorCount = this["errorCount"]?.jsonPrimitive?.content?.toIntOrNull() ?: 0,
+        createCount = this["createCount"]?.jsonPrimitive?.content?.toIntOrNull() ?: 0,
+        updateCount = this["updateCount"]?.jsonPrimitive?.content?.toIntOrNull() ?: 0,
+        categoriesToCreate = this["categoriesToCreate"]?.jsonArray?.mapNotNull { it.jsonPrimitive.contentOrNull } ?: emptyList(),
+        errors = this["errors"]?.jsonArray?.map { element ->
+            val error = element.jsonObject
+            ImportRowError(
+                line = error["line"]?.jsonPrimitive?.content?.toIntOrNull() ?: 0,
+                sku = error["sku"]?.jsonPrimitive?.contentOrNull,
+                field = error["field"]?.jsonPrimitive?.contentOrNull,
+                code = error["code"]?.jsonPrimitive?.content ?: "",
+                message = error["message"]?.jsonPrimitive?.content ?: "",
+            )
+        } ?: emptyList(),
+        preview = this["preview"]?.jsonArray?.map { element ->
+            val row = element.jsonObject
+            ImportPreviewRow(
+                line = row["line"]?.jsonPrimitive?.content?.toIntOrNull() ?: 0,
+                action = row["action"]?.jsonPrimitive?.content ?: "",
+                sku = row["sku"]?.jsonPrimitive?.content ?: "",
+                name = row["name"]?.jsonPrimitive?.content ?: "",
+                priceMinor = row["priceMinor"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0L,
+                unit = row["unit"]?.jsonPrimitive?.content ?: "",
+            )
+        } ?: emptyList(),
+        previewTruncated = this["previewTruncated"]?.jsonPrimitive?.content?.toBooleanStrictOrNull() ?: false,
+    )
 
     /**
      * Movement history straight from the server. This is deliberately NOT cached for offline reading:
