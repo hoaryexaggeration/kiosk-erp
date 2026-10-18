@@ -91,6 +91,24 @@ data class ServerBalance(
 )
 
 /**
+ * One immutable stock movement as the server records it. `quantityDelta` is signed, `reason` is the
+ * operator's words, and `sourceType` says what produced it (opening_stock, stock_receipt,
+ * stock_adjustment, sale) so history can be read without guessing. `cogsMinor` is only set on issues
+ * (ADR 0009).
+ */
+data class ServerMovement(
+    val id: String,
+    val productId: String,
+    val sku: String,
+    val quantityDelta: Double,
+    val reason: String?,
+    val sourceType: String,
+    val sourceId: String?,
+    val cogsMinor: Long?,
+    val occurredAt: String,
+)
+
+/**
  * Thin REST client for the sync/control plane. Reads are always satisfied from the local
  * database first; this client only pushes commands and pulls deltas (§5).
  */
@@ -321,6 +339,29 @@ class ApiClient {
                 sku = obj["sku"]?.jsonPrimitive?.content ?: "",
                 name = obj["name"]?.jsonPrimitive?.content ?: "",
                 quantity = obj["quantity"]?.jsonPrimitive?.content?.toDoubleOrNull() ?: 0.0,
+            )
+        } ?: emptyList()
+    }
+
+    /**
+     * Movement history straight from the server. This is deliberately NOT cached for offline reading:
+     * the device holds the current on-hand projection, not a full branch movement ledger, and inventing
+     * one locally would mean showing history that may not match what the server posted.
+     */
+    suspend fun inventoryMovements(baseUrl: String, token: String, productId: String): List<ServerMovement> = withContext(Dispatchers.IO) {
+        val response = get(baseUrl, "inventory/movements?limit=200&productId=$productId", token).jsonObject
+        response["movements"]?.jsonArray?.map { element ->
+            val obj = element.jsonObject
+            ServerMovement(
+                id = obj["id"]?.jsonPrimitive?.content ?: "",
+                productId = obj["product_id"]?.jsonPrimitive?.content ?: "",
+                sku = obj["sku"]?.jsonPrimitive?.content ?: "",
+                quantityDelta = obj["quantity_delta"]?.jsonPrimitive?.content?.toDoubleOrNull() ?: 0.0,
+                reason = obj["reason"]?.jsonPrimitive?.contentOrNull,
+                sourceType = obj["source_type"]?.jsonPrimitive?.content ?: "",
+                sourceId = obj["source_id"]?.jsonPrimitive?.contentOrNull,
+                cogsMinor = obj["cogs_minor"]?.jsonPrimitive?.contentOrNull?.toLongOrNull(),
+                occurredAt = obj["occurred_at"]?.jsonPrimitive?.content ?: "",
             )
         } ?: emptyList()
     }

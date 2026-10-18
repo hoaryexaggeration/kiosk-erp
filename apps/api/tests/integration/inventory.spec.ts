@@ -178,6 +178,18 @@ describe('inventory — receipts, adjustments and FIFO valuation (Phase 4, ADR 0
     const movements = await auth(ownerToken, request(app.getHttpServer()).get(`/v1/inventory/movements?productId=${SEED.productA}`));
     // opening + 2 receipts + 1 issue
     expect(movements.body.movements.length).toBeGreaterThanOrEqual(4);
+    // The till's history screen reads these exact keys, so pin them here rather than in the UI.
+    const newest = movements.body.movements[0];
+    expect(newest).toEqual(
+      expect.objectContaining({
+        id: expect.any(String),
+        product_id: SEED.productA,
+        sku: expect.any(String),
+        source_type: expect.any(String),
+        occurred_at: expect.anything(),
+      }),
+    );
+    expect(typeof Number(newest.quantity_delta)).toBe('number');
 
     const valuation = await auth(ownerToken, request(app.getHttpServer()).get('/v1/inventory/valuation'));
     expect(valuation.status).toBe(200);

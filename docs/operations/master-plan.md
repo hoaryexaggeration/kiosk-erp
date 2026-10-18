@@ -164,7 +164,7 @@ each later phase is expanded to the same granularity as it becomes current.
 | 4.7 | Cross-branch stock transfers with dispatch/receipt/discrepancy states (D6, ADR 0008) | Stock is in exactly one branch or in transit, never both |
 | 4.8 | Stocktake / cycle count (D7) | A count produces adjustment movements with reason and actor |
 | 4.9 | Low-stock thresholds and alerts (D8) | Threshold breach is visible on the Stock screen |
-| 4.10 | Movement history UI per product/location (D8) | Every balance can be traced to the movements that produced it |
+| 4.10 ✔ | Movement history UI per product/location (D8) | Done: per-product history in the Stock tab (source, signed quantity, reason, date, COGS); reads the server ledger |
 | 4.11 | Price lists / branch prices / scheduled prices + price-change history (D5) | A price change is versioned; a stale device price is flagged, never silently overwritten |
 
 ### Phase 5 — Offline POS vertical slice (current phase)

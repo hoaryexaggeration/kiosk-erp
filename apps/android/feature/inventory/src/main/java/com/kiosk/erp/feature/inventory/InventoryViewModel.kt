@@ -8,11 +8,24 @@ import com.kiosk.erp.core.data.session.SessionStore
 import com.kiosk.erp.core.database.ProductEntity
 import com.kiosk.erp.core.database.StockBalanceEntity
 import com.kiosk.erp.core.network.ApiClient
+import com.kiosk.erp.core.network.ServerMovement
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+
+/**
+ * The per-product movement ledger as the server reports it. Held in memory only and fetched on
+ * demand: history is a server fact, not something the device can reconstruct exactly offline.
+ */
+data class MovementHistory(
+    val product: ProductEntity,
+    val movements: List<ServerMovement> = emptyList(),
+    val loading: Boolean = false,
+    val error: String? = null,
+)
 
 class InventoryViewModel(
     private val inventoryRepository: InventoryRepository,
@@ -28,6 +41,9 @@ class InventoryViewModel(
 
     private val _message = MutableStateFlow<String?>(null)
     val message: StateFlow<String?> = _message
+
+    private val _history = MutableStateFlow<MovementHistory?>(null)
+    val history: StateFlow<MovementHistory?> = _history.asStateFlow()
 
     fun refresh() {
         viewModelScope.launch {
@@ -66,5 +82,39 @@ class InventoryViewModel(
 
     fun clearMessage() {
         _message.value = null
+    }
+
+    // --- movement history (item 4.10) ------------------------------------------------------------
+
+    fun openHistory(product: ProductEntity) {
+        _history.value = MovementHistory(product = product, loading = true)
+        loadHistory(product)
+    }
+
+    fun closeHistory() {
+        _history.value = null
+    }
+
+    fun reloadHistory() {
+        _history.value?.let { loadHistory(it.product) }
+    }
+
+    private fun loadHistory(product: ProductEntity) {
+        viewModelScope.launch {
+            val session = sessionStore.current()
+            if (!session.isAuthenticated) {
+                _history.value = MovementHistory(product, error = "Sign in first (Setup) to read movement history")
+                return@launch
+            }
+            _history.value = MovementHistory(product, loading = true)
+            runCatching { api.inventoryMovements(session.apiBaseUrl, session.accessToken!!, product.id) }
+                .onSuccess { list -> _history.value = MovementHistory(product, movements = list) }
+                .onFailure { failure ->
+                    _history.value = MovementHistory(
+                        product,
+                        error = "Could not read history — this device shows history from the server. ${failure.message ?: ""}".trim(),
+                    )
+                }
+        }
     }
 }
