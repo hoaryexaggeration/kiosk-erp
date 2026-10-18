@@ -19,6 +19,31 @@ mkdir -p "${ARTIFACTS}"
 echo "==> Building ${IMAGE} (first run downloads the Android SDK; be patient)"
 docker build -t "${IMAGE}" -f "${SCRIPT_DIR}/Dockerfile" "${SCRIPT_DIR}"
 
+# --- Stable internal-test signing key (ADR 0005) ------------------------------------------------
+# Generated once, on disk, and never committed. Without it the APK falls back to the debug key,
+# which is not upgrade-stable, so the phase phone checklists cannot be verified for real.
+KEYSTORE_DIR="${ROOT}/apps/android/keystore"
+KEYSTORE_FILE="${KEYSTORE_DIR}/internal-test.jks"
+KEYSTORE_PROPS="${KEYSTORE_DIR}/keystore.properties"
+if [[ ! -f "${KEYSTORE_FILE}" || ! -f "${KEYSTORE_PROPS}" ]]; then
+  echo "==> Generating stable internal-test signing key (one-off)"
+  mkdir -p "${KEYSTORE_DIR}"
+  KS_PASSWORD="$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+  docker run --rm -v "${KEYSTORE_DIR}":/ks "${IMAGE}" keytool -genkeypair \
+    -keystore /ks/internal-test.jks -storetype PKCS12 \
+    -alias kiosk-internal -keyalg RSA -keysize 2048 -validity 10000 \
+    -storepass "${KS_PASSWORD}" -keypass "${KS_PASSWORD}" \
+    -dname "CN=Kiosk ERP Internal Test, OU=QA, O=Kiosk, L=Nairobi, C=KE"
+  cat > "${KEYSTORE_PROPS}" <<EOF
+storeFile=keystore/internal-test.jks
+storePassword=${KS_PASSWORD}
+keyAlias=kiosk-internal
+keyPassword=${KS_PASSWORD}
+EOF
+  chmod 600 "${KEYSTORE_PROPS}"
+  echo "    key: ${KEYSTORE_FILE}"
+fi
+
 echo "==> Compiling debug APK (phase ${PHASE}, v${VERSION})"
 docker run --rm \
   -v "${ROOT}/apps/android":/workspace \

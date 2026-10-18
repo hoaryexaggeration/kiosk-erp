@@ -34,6 +34,9 @@ apps/ios/.build/
 !infra/docker/android/**/*.key
 !packages/**/fixtures/**/*.key
 
+# Android signing keystores are generated locally by build-apk.sh and never committed
+apps/android/keystore/
+
 # Runtime / local artifacts
 artifacts/
 coverage/

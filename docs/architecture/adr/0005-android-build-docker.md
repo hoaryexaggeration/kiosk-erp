@@ -19,9 +19,17 @@ control. The host requires only Docker. Grading the build: `infra/docker/android
 `build-apk.sh`, invoked by `npm run android:build`, writing artifacts to `artifacts/`.
 
 The signing keystore and its password:
-- are generated once and **never committed** (`*.jks`/`*.keystore` are git-ignored);
-- are supplied via an env/local secrets file path, defaulting to `infra/docker/android/secrets/`;
-- use a distinct **internal-test** alias, never a public/app-store key (§15).
+
+- are generated **once** by `build-apk.sh` (JDK `keytool`, run inside the builder image) so the host
+  needs nothing but Docker;
+- live at `apps/android/keystore/` and are **git-ignored** — the store itself plus a
+  `keystore.properties` holding the randomly generated store/key password (`chmod 600`);
+- use a distinct **internal-test** alias (`kiosk-internal`) and identity, never a public/app-store key
+  (§15);
+- are applied to the `debug` build type, so internal builds are **upgrade-stable** across phases;
+- fall back to the Android debug keystore only when the internal key is absent (e.g. a fresh clone
+  before the first `build-apk.sh` run), which is fine for a one-off build but not for the phase phone
+  checklists.
 
 ## Consequences
 

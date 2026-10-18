@@ -15,6 +15,10 @@ native iOS client deferred to the final phase (Phase 13).
 kiosk-erp/
 ├── apps/
 │   ├── android/                 # Kotlin + Compose native Android (buildable via Docker)
+│   │   ├── app/                 # composition root: Application, activity, DI, navigation, theme
+│   │   ├── core/                # common (domain), database (Room), network, security, data (repos+sync)
+│   │   └── feature/             # one module per domain: dashboard, pos, catalog, inventory,
+│   │                            #   sync, license, settings  (see ADR 0007)
 │   ├── ios/                     # Swift + SwiftUI native iOS (implementation deferred to Phase 13)
 │   └── api/                     # NestJS TypeScript backend (modular monolith)
 ├── packages/
@@ -46,7 +50,7 @@ kiosk-erp/
 | 1 | Domain contracts + fixtures | ✅ `packages/domain-fixtures` (34 checks), sync protocol spec |
 | 2 | Backend foundation | ✅ NestJS API, Postgres migrations, auth/RBAC, devices, catalog, licensing (JWS ES256) |
 | 3 | Android shell, local DB, sync center | ✅ APK `artifacts/retail-erp-p03-v0.3.0.apk`; see `docs/operations/phase-03-apk-record.md` |
-| 4 | Catalogue, pricing/promotions, inventory | ✅ APK `artifacts/retail-erp-p04-v0.4.0.apk`; see `docs/operations/phase-04-apk-record.md` |
+| 4 | Catalogue, pricing/promotions, inventory | ✅ APK `artifacts/retail-erp-p04-v0.4.0.apk`; multi-module split (ADR 0007); see `docs/operations/phase-04-apk-record.md` |
 | 5–12 | Full POS → release candidate | ⏳ planned |
 | 13 | Native iOS client | ⏳ scaffolded in `apps/ios/` |
 

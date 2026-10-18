@@ -2,13 +2,13 @@ package com.kiosk.erp.ui
 
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Dashboard
 import androidx.compose.material.icons.filled.Inventory2
 import androidx.compose.material.icons.filled.PointOfSale
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.filled.VerifiedUser
 import androidx.compose.material.icons.filled.Warehouse
-import androidx.compose.material.icons.filled.Dashboard
 import androidx.compose.material3.Icon
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
@@ -24,13 +24,13 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.kiosk.erp.di.AppContainer
-import com.kiosk.erp.ui.screens.CatalogScreen
-import com.kiosk.erp.ui.screens.DashboardScreen
-import com.kiosk.erp.ui.screens.InventoryScreen
-import com.kiosk.erp.ui.screens.LicenseScreen
-import com.kiosk.erp.ui.screens.PosScreen
-import com.kiosk.erp.ui.screens.SettingsScreen
-import com.kiosk.erp.ui.screens.SyncCenterScreen
+import com.kiosk.erp.feature.catalog.CatalogScreen
+import com.kiosk.erp.feature.dashboard.DashboardScreen
+import com.kiosk.erp.feature.inventory.InventoryScreen
+import com.kiosk.erp.feature.license.LicenseScreen
+import com.kiosk.erp.feature.pos.PosScreen
+import com.kiosk.erp.feature.settings.SettingsScreen
+import com.kiosk.erp.feature.sync.SyncCenterScreen
 
 private data class Tab(val route: String, val label: String, val icon: ImageVector)
 

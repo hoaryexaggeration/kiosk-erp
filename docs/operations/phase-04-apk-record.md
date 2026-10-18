@@ -7,11 +7,16 @@ Required by §15 "Mandatory Android APK delivery gate". Every field below is par
 | **Phase** | 4 — Catalogue, pricing/promotions and inventory |
 | **App version** | `0.4.0` (versionCode 4) |
 | **Artifact** | `artifacts/retail-erp-p04-v0.4.0.apk` |
-| **SHA-256** | `c02d51c2fe78cc3cc13dfa341c885fa273dd4e8be8f2f6f7ae7269ff80f4bb50` |
-| **Size** | ~17.8 MB |
-| **Signing** | Android **debug** keystore (internal test only; a stable internal-test keystore must replace this before owner testing so upgrades preserve data — see ADR 0005) |
+| **SHA-256** | `05a0660813619d8c9b0cca97802555814ad12f48dd8f8ec374b838d3e12fe512` |
+| **Size** | ~17.9 MB |
+| **Signing** | **Stable internal-test key** (`CN=Kiosk ERP Internal Test`, cert SHA-256 `935c0fbc6993db9ca761b4c3610c71a50d91897fd9b1753d0da3e56dffd056dd`), generated once by `build-apk.sh` and git-ignored (ADR 0005) |
 | **Build** | Docker image `kiosk-erp-android-builder` (JDK 17 + Android SDK 34 + Gradle 8.7); `PHASE=04 VERSION=0.4.0 bash infra/docker/android/build-apk.sh` |
 | **Expected backend** | `apps/api` on `http://<host>:3000/v1`; seed tenant/branch from `seed-dev.ts` |
+
+> **Upgrade note.** Phase 3's APK was signed with the throwaway Android debug key, so it **cannot be
+> upgraded in place** by this build (signature mismatch) — uninstall the Phase 3 build first. This is
+> the last time that happens: every APK from Phase 4 onward is signed with the stable internal-test
+> key, so upgrades preserve on-device data.
 
 ## Changelog
 
@@ -41,6 +46,11 @@ Server (`apps/api`):
 
 Android (`apps/android`):
 
+- **Multi-module split (ADR 0007)**: `:app` (composition root) + `:core:{common,database,network,security,data}`
+  + `:feature:{dashboard,pos,catalog,inventory,sync,license,settings}`, with a Gradle version catalog
+  and dependencies pointing strictly inward.
+- **Stable internal-test signing key** generated once by `build-apk.sh` and git-ignored (ADR 0005), so
+  APKs upgrade in place from this phase onward.
 - New **Stock** tab: cached on-hand projection, refresh-from-server, and offline stock adjustments
   (signed delta + mandatory reason) queued in the outbox.
 - Room **version 2** with a real, data-preserving `MIGRATION_1_2` — a destructive fallback was
@@ -48,6 +58,7 @@ Android (`apps/android`):
 - `SyncEngine` now **applies catalogue deltas** (`product.created` / `product.updated`) while pulling,
   and refreshes the balance cache after each sync (a balance failure never fails the sync).
 - Product cache is populated from synced tax categories instead of a hard-coded rate.
+- `ApiClient` returns typed auth results, so feature modules no longer parse raw JSON.
 
 ## Verification
 
@@ -58,11 +69,12 @@ Android (`apps/android`):
   product delta events, and `asOf` promotion resolution).
 - `npm run fixtures:check`: 34/34.
 - `tsc -p tsconfig.build.json --noEmit`: clean.
-- Docker APK build: clean, **zero Kotlin warnings**.
+- Docker APK build across 13 Gradle modules: clean, **zero Kotlin warnings**.
+- APK signature verified with `apksigner verify --print-certs` (internal-test identity, see table).
 
 ## Known limitations (phase-scoped)
 
-- Debug keystore; not upgrade-stable yet.
+- Signed with an **internal-test** key (not a store key); fine for owner testing, not for distribution.
 - Seven bottom-nav tabs is one beyond the Material recommendation; a grouped navigation refinement
   (Catalogue ⇄ Stock) is queued for Phase 5.
 - Receipts are touch-entry only; camera barcode scanning and printer adapters remain Phase 5.
@@ -70,12 +82,15 @@ Android (`apps/android`):
 - Adjustments support a single line per command in the UI (the server accepts multi-line).
 - Costing uses branch-level weighted average on receipt only; full stocktake reconciliation and
   approvals (`approved_by` is persisted but not yet populated by a UI flow) land later.
+- Module build files are currently explicit per module; convention plugins are a possible
+  consolidation if the configuration phase becomes a bottleneck (ADR 0007).
 
 ## Phone test checklist (owner runs on a physical Android device)
 
 | # | Test | Pass/fail |
 |---|---|---|
-| 1 | App **upgrades over the Phase 3 install without losing data** (Room v1 → v2 migration) | ☐ |
+| 1 | Uninstall the Phase 3 build, install this one, launch (no startup crash) | ☐ |
+| 1b | From Phase 4 onward: install a later build **over** this one and confirm local data is kept | ☐ |
 | 2 | Catalogue: **Refresh from server** → product list shows real prices | ☐ |
 | 3 | Stock tab: **Refresh balances** → seeded on-hand appears | ☐ |
 | 4 | Stock tab: apply `-2` with reason `shrinkage` → "Queued … waiting to sync"; an empty reason is refused | ☐ |
