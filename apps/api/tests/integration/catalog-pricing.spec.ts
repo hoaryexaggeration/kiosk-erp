@@ -109,6 +109,22 @@ describe('catalogue + price resolution (Phase 4)', () => {
     expect(cleared.body.barcodes).toEqual([]);
   });
 
+  it('refuses a barcode already owned by another product at create time too (item 4.4)', async () => {
+    // Create used to insert barcodes with ON CONFLICT DO NOTHING, so a clashing barcode was silently
+    // dropped and the caller saw a product with fewer barcodes than they asked for. It is now the same
+    // conflict the update path raises.
+    const res = await auth(request(app.getHttpServer()).post('/v1/products')).send({
+      sku: 'PH4BC10',
+      name: 'Clashing barcode',
+      priceMinor: 1000,
+      barcodes: ['6001000000011'],
+    });
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('DUPLICATE_BARCODE');
+    const lookup = await auth(request(app.getHttpServer()).get('/v1/barcodes/6001000000011'));
+    expect(lookup.body.id).toBe(SEED.productA);
+  });
+
   it('carries the tax category through create and update so an edit cannot silently clear it', async () => {
     // The device caches `tax_category_id` and sends it back on save. If the payload omitted it, an
     // edit would send null and quietly drop the product's 16% VAT rate.

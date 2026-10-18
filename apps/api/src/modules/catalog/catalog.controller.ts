@@ -46,6 +46,21 @@ const CategorySchema = z.object({
   parentId: z.string().uuid().optional(),
 });
 
+/**
+ * Bulk import. `csv` or `records` (not both); `commit: false` is a pure preview. A file with any bad
+ * row is reported, not partially applied — see CatalogService.importProducts.
+ */
+const ProductImportSchema = z
+  .object({
+    csv: z.string().max(5_000_000).optional(),
+    records: z.array(z.unknown()).max(5000).optional(),
+    commit: z.boolean().default(false),
+    createMissingCategories: z.boolean().default(false),
+  })
+  .refine((value) => (value.csv === undefined) !== (value.records === undefined), {
+    message: 'Provide exactly one of csv or records',
+  });
+
 @Controller()
 export class CatalogController {
   constructor(private readonly catalog: CatalogService) {}
@@ -72,6 +87,19 @@ export class CatalogController {
   async update(@CurrentAuth() ctx: AuthContext, @Req() req: AuthedRequest, @Param('id') id: string, @Body() body: unknown) {
     const input = UpdateProductSchema.parse(body);
     return this.catalog.updateProduct(ctx.tenantId, ctx.userId, req.correlationId, id, input);
+  }
+
+  /**
+   * Bulk catalogue import (item 4.4). A rejected file answers 200 with the per-row error report rather
+   * than an error status: the report IS the resource the operator asked for, and a preview that found
+   * problems is a successful preview, not a failed request. Nothing is written unless `commit` is true
+   * AND every row is valid.
+   */
+  @Post('products/import')
+  @RequirePermissions('catalog.manage')
+  async import(@CurrentAuth() ctx: AuthContext, @Req() req: AuthedRequest, @Body() body: unknown) {
+    const input = ProductImportSchema.parse(body);
+    return this.catalog.importProducts(ctx.tenantId, ctx.userId, req.correlationId, input);
   }
 
   @Get('barcodes/:code')

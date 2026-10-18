@@ -111,7 +111,7 @@ must be completed when its target phase is reached.
 | # | Item skipped | Appears in | Target phase | Done |
 |---|---|---|---|---|
 | D1 | Product/category/tax **management UI** (server CRUD exists) | §3.C, §15 Ph4 | 4 ✔ | ✔ |
-| D2 | Bulk product import with preview/validation/error report (`POST /v1/products/import`) | §9, §15 Ph4 | 4 | ☐ |
+| D2 | Bulk product import with preview/validation/error report (`POST /v1/products/import`) | §9, §15 Ph4 | 4 | ◐ server ✔, UI pending |
 | D3 | Opening-stock import workflow (seeded opening stock with FIFO layers exists) | §15 Ph4 | 4 | ◐ |
 | D4 | Units of measure + conversions, variants, brands, supplier product codes | §3.C | 4 | ☐ |
 | D5 | Price lists, branch/customer/scheduled prices, price-change history | §3.C | 4 | ☐ |
@@ -158,7 +158,7 @@ each later phase is expanded to the same granularity as it becomes current.
 | 4.1 ✔ | `PATCH /v1/products/:id` accepts `barcodes`; device replaces that product's barcodes transactionally (D9) | Done: set semantics, `DUPLICATE_BARCODE` conflict, barcode resolves immediately after the change |
 | 4.2 ✔ | Product management UI: list/search, create, edit, deactivate; barcodes, category, tax category, unit, cost, price | Done: `feature:catalog` list + editor + barcode set editing; Room v3 adds description/category/taxCategory/active |
 | 4.3 ✔ | Category + tax-category management UI | Done: "Categories & tax" screen in `feature:catalog`; rate entered as a percentage, stored exactly in basis points |
-| 4.4 | Bulk import: CSV/JSON upload → **preview → validation → per-row error report → commit** (D2) | A malformed file creates **no partial records** and reports every bad row |
+| 4.4 ◐ | Bulk import: CSV/JSON upload → **preview → validation → per-row error report → commit** (D2) | Server done: `POST /v1/products/import` (preview/commit share one planner, all-or-nothing), pure CSV reader + planner with 18 unit tests, 8 endpoint tests. Device file-picker UI still to come |
 | 4.5 | Opening stock import (D3) | Opening balances arrive as stock movements, never as a direct quantity edit |
 | 4.6 | Units of measure + conversions (D4) | Buying in crates and selling in pieces keeps one stock ledger |
 | 4.7 | Cross-branch stock transfers with dispatch/receipt/discrepancy states (D6, ADR 0008) | Stock is in exactly one branch or in transit, never both |

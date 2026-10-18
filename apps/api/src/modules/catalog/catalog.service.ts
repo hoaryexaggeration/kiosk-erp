@@ -5,6 +5,8 @@ import { Database } from '../../db/database';
 import { EventsService } from '../platform/events.service';
 import { AppError } from '../../common/errors';
 import { newId } from '../../common/ids';
+import { parseCsv } from '../../domain/csv';
+import { ImportReferenceData, planProductImport, recordsToCsvRows } from './product-import';
 
 export interface CreateProductInput {
   id?: string;
@@ -171,31 +173,68 @@ export class CatalogService {
         })
         .execute();
 
-      for (const barcode of input.barcodes ?? []) {
-        await trx.insertInto('barcodes').values({ tenant_id: tenantId, product_id: id, barcode }).onConflict((oc) => oc.columns(['tenant_id', 'barcode']).doNothing()).execute();
-      }
+      await this.replaceBarcodes(trx, tenantId, id, input.barcodes ?? []);
 
-      const payload = await this.productPayload(trx, tenantId, id);
-      await this.events.audit(trx, {
-        tenantId,
-        actorId,
-        action: 'product.created',
-        aggregateType: 'Product',
-        aggregateId: id,
-        after: payload,
-        correlationId,
-      });
-      await this.events.serverEvent(trx, {
-        tenantId,
-        eventType: 'product.created',
-        aggregateType: 'Product',
-        aggregateId: id,
-        payload,
-      });
-      await this.events.outbox(trx, tenantId, 'product.created', { productId: id });
-
-      return payload;
+      return this.recordProductChange(trx, tenantId, actorId, correlationId, 'product.created', id);
     });
+  }
+
+  /**
+   * The barcode set is replaced, never merged (item 4.1). A barcode belongs to one tenant exactly
+   * once, so a clash with a *different* product is a conflict the operator must resolve, not a
+   * barcode we quietly reassign.
+   */
+  private async replaceBarcodes(trx: Kysely<Database>, tenantId: string, productId: string, requested: string[]) {
+    const desired = [...new Set(requested.map((barcode) => barcode.trim()).filter((barcode) => barcode.length > 0))];
+    if (desired.length > 0) {
+      const clash = await trx
+        .selectFrom('barcodes')
+        .select(['barcode', 'product_id'])
+        .where('tenant_id', '=', tenantId)
+        .where('barcode', 'in', desired)
+        .where('product_id', '!=', productId)
+        .executeTakeFirst();
+      if (clash) throw AppError.conflict('DUPLICATE_BARCODE', `Barcode ${clash.barcode} already belongs to another product`);
+    }
+    const stale = trx.deleteFrom('barcodes').where('tenant_id', '=', tenantId).where('product_id', '=', productId);
+    if (desired.length > 0) {
+      await stale.where('barcode', 'not in', desired).execute();
+    } else {
+      await stale.execute();
+    }
+    for (const barcode of desired) {
+      await trx
+        .insertInto('barcodes')
+        .values({ tenant_id: tenantId, product_id: productId, barcode })
+        .onConflict((oc) => oc.columns(['tenant_id', 'barcode']).doNothing())
+        .execute();
+    }
+  }
+
+  /** One product change is one audit entry, one server event and one outbox nudge — always together. */
+  private async recordProductChange(
+    trx: Kysely<Database>,
+    tenantId: string,
+    actorId: string,
+    correlationId: string,
+    action: 'product.created' | 'product.updated',
+    productId: string,
+    before?: unknown,
+  ) {
+    const after = await this.productPayload(trx, tenantId, productId);
+    await this.events.audit(trx, {
+      tenantId,
+      actorId,
+      action,
+      aggregateType: 'Product',
+      aggregateId: productId,
+      before,
+      after,
+      correlationId,
+    });
+    await this.events.serverEvent(trx, { tenantId, eventType: action, aggregateType: 'Product', aggregateId: productId, payload: after });
+    await this.events.outbox(trx, tenantId, action, { productId });
+    return after;
   }
 
   /** Optimistic-concurrency update. Bumps `version`; devices merge on the new version. */
@@ -237,56 +276,182 @@ export class CatalogService {
         .where('id', '=', productId)
         .execute();
 
-      // Replace the barcode set when the caller supplied one (item 4.1). A barcode belongs to one
-      // tenant exactly once, so a clash with a *different* product is a conflict, not a silent move.
-      if (input.barcodes !== undefined) {
-        const desired = [...new Set(input.barcodes.map((b) => b.trim()).filter((b) => b.length > 0))];
-        if (desired.length > 0) {
-          const clash = await trx
-            .selectFrom('barcodes')
-            .select(['barcode', 'product_id'])
-            .where('tenant_id', '=', tenantId)
-            .where('barcode', 'in', desired)
-            .where('product_id', '!=', productId)
-            .executeTakeFirst();
-          if (clash) throw AppError.conflict('DUPLICATE_BARCODE', `Barcode ${clash.barcode} already belongs to another product`);
-        }
-        const stale = trx.deleteFrom('barcodes').where('tenant_id', '=', tenantId).where('product_id', '=', productId);
-        if (desired.length > 0) {
-          await stale.where('barcode', 'not in', desired).execute();
-        } else {
-          await stale.execute();
-        }
-        for (const barcode of desired) {
+      // Replace the barcode set when the caller supplied one (item 4.1).
+      if (input.barcodes !== undefined) await this.replaceBarcodes(trx, tenantId, productId, input.barcodes);
+
+      return this.recordProductChange(trx, tenantId, actorId, correlationId, 'product.updated', productId, before);
+    });
+  }
+
+  /**
+   * Bulk catalogue import (item 4.4): parse -> plan -> optionally apply.
+   *
+   * Preview and commit share ONE planner, so the report the operator approves is exactly the report a
+   * commit acts on. A commit with any invalid row writes nothing at all: a half-imported catalogue is
+   * worse than a rejected file, because nobody can then tell which half is real.
+   */
+  async importProducts(
+    tenantId: string,
+    actorId: string,
+    correlationId: string,
+    input: { csv?: string; records?: unknown[]; commit: boolean; createMissingCategories: boolean },
+  ) {
+    const parsed = input.csv !== undefined ? parseCsv(input.csv) : recordsToCsvRows(input.records ?? []);
+    const reference = await this.importReference(tenantId);
+    const plan = planProductImport(parsed, reference, { createMissingCategories: input.createMissingCategories });
+
+    const report = {
+      status: (plan.errors.length > 0 ? 'invalid' : input.commit ? 'committed' : 'validated') as 'invalid' | 'committed' | 'validated',
+      rowCount: Math.max(parsed.length - 1, 0),
+      validCount: plan.rows.length,
+      errorCount: plan.errors.length,
+      createCount: plan.createCount,
+      updateCount: plan.updateCount,
+      categoriesToCreate: plan.categoriesToCreate,
+      errors: plan.errors,
+      previewTruncated: plan.rows.length > 100,
+      preview: plan.rows.slice(0, 100).map((row) => ({
+        line: row.line,
+        action: row.action,
+        sku: row.sku,
+        name: row.name,
+        category: row.categoryName,
+        unit: row.unit,
+        priceMinor: row.priceMinor,
+        costMinor: row.costMinor,
+        barcodes: row.barcodes,
+      })),
+    };
+
+    // The guard above is the whole point: invalid or preview-only never reaches a write.
+    if (!input.commit || plan.errors.length > 0) return report;
+
+    await this.dbs.transaction(async (trx) => {
+      const categoryIdByName = new Map([...reference.categoriesByName].map(([key, value]) => [key, value.id] as const));
+      for (const name of plan.categoriesToCreate) {
+        const id = newId();
+        await trx.insertInto('categories').values({ id, tenant_id: tenantId, name, parent_id: null }).execute();
+        categoryIdByName.set(name.toLowerCase(), id);
+        await this.events.audit(trx, {
+          tenantId,
+          actorId,
+          action: 'category.created',
+          aggregateType: 'Category',
+          aggregateId: id,
+          after: { name, source: 'import' },
+          correlationId,
+        });
+      }
+
+      for (const row of plan.rows) {
+        const categoryId = row.categoryName ? categoryIdByName.get(row.categoryName.toLowerCase()) ?? null : null;
+        if (row.action === 'create') {
+          const id = newId();
           await trx
-            .insertInto('barcodes')
-            .values({ tenant_id: tenantId, product_id: productId, barcode })
-            .onConflict((oc) => oc.columns(['tenant_id', 'barcode']).doNothing())
+            .insertInto('products')
+            .values({
+              id,
+              tenant_id: tenantId,
+              sku: row.sku,
+              name: row.name,
+              description: row.description,
+              category_id: categoryId,
+              tax_category_id: row.taxCategoryId,
+              unit: row.unit,
+              is_stock_tracked: row.isStockTracked,
+              is_active: row.isActive,
+              price_minor: row.priceMinor,
+              cost_minor: row.costMinor,
+            })
             .execute();
+          if (row.barcodes) await this.replaceBarcodes(trx, tenantId, id, row.barcodes);
+          await this.recordProductChange(trx, tenantId, actorId, correlationId, 'product.created', id);
+        } else {
+          if (!row.productId) throw new Error('import planner produced an update without a product id');
+          const before = await this.productPayload(trx, tenantId, row.productId);
+          await trx
+            .updateTable('products')
+            .set({
+              // The file is the desired state of the columns it carries. The barcode column is the one
+              // exception: when the file has no barcode column at all, the stored set is left alone
+              // rather than wiped because someone omitted a column (see PlannedProductRow.barcodes).
+              sku: row.sku,
+              name: row.name,
+              description: row.description,
+              category_id: categoryId,
+              tax_category_id: row.taxCategoryId,
+              unit: row.unit,
+              is_stock_tracked: row.isStockTracked,
+              is_active: row.isActive,
+              price_minor: row.priceMinor,
+              cost_minor: row.costMinor,
+              version: Number((before as { version?: number }).version ?? 1) + 1,
+              updated_at: new Date(),
+            })
+            .where('id', '=', row.productId)
+            .where('tenant_id', '=', tenantId)
+            .execute();
+          if (row.barcodes) await this.replaceBarcodes(trx, tenantId, row.productId, row.barcodes);
+          await this.recordProductChange(trx, tenantId, actorId, correlationId, 'product.updated', row.productId, before);
         }
       }
 
-      const after = await this.productPayload(trx, tenantId, productId);
+      // One line for the batch itself, so the audit trail shows the file that caused the changes even
+      // after the individual product events have been read individually.
       await this.events.audit(trx, {
         tenantId,
         actorId,
-        action: 'product.updated',
-        aggregateType: 'Product',
-        aggregateId: productId,
-        before,
-        after,
+        action: 'catalog.imported',
+        aggregateType: 'ProductImport',
+        aggregateId: correlationId,
+        after: {
+          createCount: plan.createCount,
+          updateCount: plan.updateCount,
+          categoriesCreated: plan.categoriesToCreate,
+          source: input.csv !== undefined ? 'csv' : 'records',
+        },
         correlationId,
       });
-      await this.events.serverEvent(trx, {
-        tenantId,
-        eventType: 'product.updated',
-        aggregateType: 'Product',
-        aggregateId: productId,
-        payload: after,
-      });
-      await this.events.outbox(trx, tenantId, 'product.updated', { productId });
-      return after;
     });
+
+    return report;
+  }
+
+  /**
+   * A snapshot of what the file must be resolved against. One query per table rather than a lookup per
+   * row: an import of a few thousand rows must not become a few thousand round-trips.
+   */
+  private async importReference(tenantId: string): Promise<ImportReferenceData> {
+    const [products, barcodes, taxCategories, categories] = await Promise.all([
+      this.dbs.db.selectFrom('products').select(['id', 'sku']).where('tenant_id', '=', tenantId).where('deleted_at', 'is', null).execute(),
+      this.dbs.db.selectFrom('barcodes').select(['barcode', 'product_id']).where('tenant_id', '=', tenantId).execute(),
+      this.dbs.db.selectFrom('tax_categories').select(['id', 'name']).where('tenant_id', '=', tenantId).execute(),
+      this.dbs.db.selectFrom('categories').select(['id', 'name']).where('tenant_id', '=', tenantId).execute(),
+    ]);
+
+    // SKUs are matched ignoring case (a shopkeeper writes "milk-1l" and "MILK-1L" meaning one product).
+    // Postgres' unique index is case-sensitive, so two products may legitimately differ only by case;
+    // such an SKU is reported as ambiguous rather than updating whichever row was read first.
+    const productIdBySku = new Map<string, string>();
+    const ambiguousSkus = new Set<string>();
+    for (const product of products) {
+      const key = product.sku.toLowerCase();
+      if (ambiguousSkus.has(key)) continue;
+      if (productIdBySku.has(key)) {
+        productIdBySku.delete(key);
+        ambiguousSkus.add(key);
+        continue;
+      }
+      productIdBySku.set(key, product.id);
+    }
+
+    return {
+      productIdBySku,
+      ambiguousSkus,
+      barcodeOwner: new Map(barcodes.map((row) => [row.barcode, row.product_id])),
+      taxCategoriesByName: new Map(taxCategories.map((row) => [row.name.toLowerCase(), { id: row.id, name: row.name }])),
+      categoriesByName: new Map(categories.map((row) => [row.name.toLowerCase(), { id: row.id, name: row.name }])),
+    };
   }
 
   async lookupBarcode(tenantId: string, code: string) {
