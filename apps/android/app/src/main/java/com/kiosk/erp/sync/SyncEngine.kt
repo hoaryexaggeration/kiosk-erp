@@ -3,8 +3,10 @@ package com.kiosk.erp.sync
 import com.kiosk.erp.data.local.KioskDatabase
 import com.kiosk.erp.data.local.SyncStateEntity
 import com.kiosk.erp.data.remote.ApiClient
+import com.kiosk.erp.data.repository.SaleRepository
 import com.kiosk.erp.data.session.SessionStore
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
@@ -18,6 +20,7 @@ class SyncEngine(
     private val db: KioskDatabase,
     private val api: ApiClient,
     private val sessionStore: SessionStore,
+    private val saleRepository: SaleRepository,
 ) {
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
 
@@ -32,8 +35,6 @@ class SyncEngine(
         if (!session.canSync) return Result.NotConfigured
         val token = session.accessToken!!
         val baseUrl = session.apiBaseUrl
-        val deviceId = session.deviceId!!
-        val branchId = session.branchId!!
 
         if (db.syncStateDao().get() == null) {
             db.syncStateDao().upsert(SyncStateEntity(id = 1, cursor = 0, lastPushAtEpochMs = null, lastPullAtEpochMs = null, serverReachable = false, lastError = null))
@@ -87,6 +88,14 @@ class SyncEngine(
             // Pull deltas after push.
             val state = db.syncStateDao().get() ?: SyncStateEntity(1, 0, null, null, false, null)
             val page = api.pull(baseUrl, token, state.cursor)
+            for (event in page.events) {
+                applyServerEvent(event)
+            }
+
+            // Refresh the server-derived balance projection. A failure here must not fail the whole
+            // sync — sales/commands are the critical path, stock is a convenience cache.
+            runCatching { saleRepository.cacheBalances(api.inventoryBalances(baseUrl, token)) }
+
             val now = System.currentTimeMillis()
             db.syncStateDao().upsert(
                 SyncStateEntity(id = 1, cursor = page.cursor, lastPushAtEpochMs = now, lastPullAtEpochMs = now, serverReachable = true, lastError = null),
@@ -96,6 +105,17 @@ class SyncEngine(
             val state = db.syncStateDao().get() ?: SyncStateEntity(1, 0, null, null, false, null)
             db.syncStateDao().upsert(state.copy(serverReachable = false, lastError = err.message))
             return Result.Failure(err.message ?: "Sync failed")
+        }
+    }
+
+    /** Apply an ordered server delta to the local cache. Unknown event types are ignored forward-compatibly. */
+    private suspend fun applyServerEvent(event: JsonObject) {
+        val aggregateType = event["aggregateType"]?.jsonPrimitive?.content
+        val eventType = event["eventType"]?.jsonPrimitive?.content ?: return
+        val payload = event["payload"] as? JsonObject ?: return
+        when {
+            aggregateType == "Product" && (eventType == "product.created" || eventType == "product.updated") ->
+                saleRepository.applyProductEvent(payload)
         }
     }
 }

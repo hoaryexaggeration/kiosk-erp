@@ -173,7 +173,22 @@ export interface InventoryMovementsTable {
   actor_id: string | null;
   device_id: string | null;
   command_id: string | null;
+  approved_by: string | null;
+  approval_note: string | null;
   occurred_at: Generated<Date>;
+  created_at: Generated<Date>;
+}
+export interface PromotionsTable {
+  id: Generated<string>;
+  tenant_id: string;
+  name: string;
+  kind: string;
+  value: number;
+  product_id: string | null;
+  category_id: string | null;
+  starts_at: Date | null;
+  ends_at: Date | null;
+  is_active: Generated<boolean>;
   created_at: Generated<Date>;
 }
 export interface StockBalancesTable {
@@ -456,6 +471,7 @@ export interface Database {
   suppliers: SuppliersTable;
   stock_locations: StockLocationsTable;
   inventory_movements: InventoryMovementsTable;
+  promotions: PromotionsTable;
   stock_balances: StockBalancesTable;
   cash_sessions: CashSessionsTable;
   cash_movements: CashMovementsTable;

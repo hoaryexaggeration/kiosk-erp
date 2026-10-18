@@ -37,6 +37,16 @@ data class ServerProduct(
     val priceMinor: Long,
     val costMinor: Long,
     val version: Int,
+    val taxRateBp: Int,
+    val taxInclusive: Boolean,
+)
+
+data class ServerBalance(
+    val productId: String,
+    val branchId: String,
+    val sku: String,
+    val name: String,
+    val quantity: Double,
 )
 
 /**
@@ -80,7 +90,7 @@ class ApiClient {
     private fun parseError(status: Int, text: String): ApiException {
         val code = runCatching { json.parseToJsonElement(text).jsonObject["code"]?.jsonPrimitive?.content }.getOrNull() ?: "HTTP_$status"
         val message = runCatching { json.parseToJsonElement(text).jsonObject["message"]?.jsonPrimitive?.content }.getOrNull() ?: text
-        return ApiException(status, code, message ?: "Request failed")
+        return ApiException(status, code, message)
     }
 
     suspend fun login(baseUrl: String, email: String, password: String, deviceId: String?): JsonObject = withContext(Dispatchers.IO) {
@@ -138,6 +148,22 @@ class ApiClient {
                 priceMinor = obj["price_minor"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0L,
                 costMinor = obj["cost_minor"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0L,
                 version = obj["version"]?.jsonPrimitive?.content?.toIntOrNull() ?: 1,
+                taxRateBp = obj["tax_rate_bp"]?.jsonPrimitive?.content?.toIntOrNull() ?: 0,
+                taxInclusive = obj["tax_inclusive"]?.jsonPrimitive?.content?.toBooleanStrictOrNull() ?: false,
+            )
+        } ?: emptyList()
+    }
+
+    suspend fun inventoryBalances(baseUrl: String, token: String): List<ServerBalance> = withContext(Dispatchers.IO) {
+        val response = get(baseUrl, "inventory/balances?limit=500", token).jsonObject
+        response["balances"]?.jsonArray?.map { element ->
+            val obj = element.jsonObject
+            ServerBalance(
+                productId = obj["product_id"]?.jsonPrimitive?.content ?: "",
+                branchId = obj["branch_id"]?.jsonPrimitive?.content ?: "",
+                sku = obj["sku"]?.jsonPrimitive?.content ?: "",
+                name = obj["name"]?.jsonPrimitive?.content ?: "",
+                quantity = obj["quantity"]?.jsonPrimitive?.content?.toDoubleOrNull() ?: 0.0,
             )
         } ?: emptyList()
     }

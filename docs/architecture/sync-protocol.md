@@ -41,7 +41,23 @@ canonical ordering uses server sequence.
 | `POST` | `/v1/sync/conflicts/:id/resolve` | Audited resolution of a conflict case |
 | `POST` | `/v1/devices/enroll` | Register a device through an authenticated owner/admin flow |
 
-## 3. Push result states
+## 3. Synced aggregates and server-side authority
+
+A synced command is applied only if the **authenticated actor holds the aggregate's permission** —
+a device token is proof of enrollment, never of authority. Permissions are checked server-side inside
+the push transaction; a missing permission yields `rejected` / `FORBIDDEN`.
+
+| `aggregateType` | Required permission | Payload (abridged) | Effect |
+|---|---|---|---|
+| `Sale` | `pos.sale.create` | `{ sale: { id, lines[], tenders[] } }` | Canonical sale + stock movements + AR + journal |
+| `StockReceipt` | `inventory.receive` | `{ receipt: { id, reason, lines[{ productId, quantity, unitCostMinor? }] } }` | Append stock in; roll weighted-average cost |
+| `StockAdjustment` | `inventory.adjust` | `{ adjustment: { id, reason, lines[{ productId, quantityDelta }] } }` | Append signed movement; `reason` mandatory |
+
+Unknown aggregates return `rejected` / `UNSUPPORTED_AGGREGATE`. Every `conflictCodes` entry returned by
+an aggregate becomes a durable `conflict_cases` row (Phase 4 centralised this in the sync layer so all
+aggregate types get identical, auditable exception handling).
+
+## 4. Push result states
 
 For each command the server returns exactly one of:
 
@@ -54,7 +70,7 @@ For each command the server returns exactly one of:
 | `conflict` | Version/idempotency conflict | Conflict inbox with a `conflictId` |
 | `review_required` | Needs supervisor (e.g. offline credit breach) | Conflict inbox, high visibility |
 
-## 4. Idempotency rules (§6)
+## 5. Idempotency rules (§6)
 
 - `commandId` is unique and immutable.
 - The server stores processed command ids and their outcomes under a **unique constraint**
@@ -63,7 +79,7 @@ For each command the server returns exactly one of:
 - A retry **reuses the same commandId**. A new key on a retry can double-post — this is a defect.
 - Payment provider callbacks use the provider's event/reference id under the same unique discipline.
 
-## 5. Pull / cursor semantics
+## 6. Pull / cursor semantics
 
 - Server deltas are ordered by `server_events.seq` (monotonic, server-assigned).
 - The client **advances its cursor only after the entire corresponding page is durably committed
@@ -72,7 +88,7 @@ For each command the server returns exactly one of:
   may also skip events `<= cursor`).
 - The cursor is **opaque** to the client.
 
-## 6. Conflict policy (§6)
+## 7. Conflict policy (§6)
 
 **Never use blanket last-write-wins for money, quantities, payments, accounting entries, returns or
 posted documents.**
@@ -88,13 +104,13 @@ posted documents.**
 | Revoked user/role while offline | `OFFLINE_PERMISSION_EXPIRED` | Apply revocation on reconnect; limited offline validity window |
 | Deleted master referenced by pending sale | `DELETED_REFERENCE` | Tombstones + retained snapshots; never hard-delete referenced data |
 
-## 7. Transport requirements (§6)
+## 8. Transport requirements (§6)
 
 TLS; bounded payloads (default 200 commands / request, 500 deltas / page); gzip where useful;
 pagination; correlation ids on every request/response; exponential backoff **with jitter**;
 network-aware scheduling; request timeouts; server-side rate limits.
 
-## 8. Failure-visibility rule (§1.6 rule 3, §12)
+## 9. Failure-visibility rule (§1.6 rule 3, §12)
 
 Pending, accepted, rejected and conflict states MUST be visible and recoverable. A user cannot clear a
 failure by dismissing a warning. Screens that depend on shared/cached data show data age, last sync

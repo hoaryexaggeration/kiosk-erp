@@ -12,6 +12,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import java.util.UUID
 
@@ -164,25 +165,60 @@ class SaleRepository(private val db: KioskDatabase) {
     }
 
     suspend fun refreshProducts(products: List<com.kiosk.erp.data.remote.ServerProduct>) {
+        db.productDao().upsertAll(products.map { it.toEntity() })
+    }
+
+    /** Apply a `product.created` / `product.updated` server event to the local cache (delta sync). */
+    suspend fun applyProductEvent(obj: kotlinx.serialization.json.JsonObject) {
+        val id = obj["id"]?.jsonPrimitive?.content ?: return
         db.productDao().upsertAll(
-            products.map {
+            listOf(
                 com.kiosk.erp.data.local.ProductEntity(
-                    id = it.id,
+                    id = id,
+                    sku = obj["sku"]?.jsonPrimitive?.content ?: return,
+                    name = obj["name"]?.jsonPrimitive?.content ?: return,
+                    unit = obj["unit"]?.jsonPrimitive?.content ?: "ea",
+                    priceMinor = obj["price_minor"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0L,
+                    costMinor = obj["cost_minor"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0L,
+                    taxRateBp = obj["tax_rate_bp"]?.jsonPrimitive?.content?.toIntOrNull() ?: 0,
+                    taxInclusive = obj["tax_inclusive"]?.jsonPrimitive?.content?.toBooleanStrictOrNull() ?: false,
+                    isStockTracked = obj["is_stock_tracked"]?.jsonPrimitive?.content?.toBooleanStrictOrNull() ?: true,
+                    version = obj["version"]?.jsonPrimitive?.content?.toIntOrNull() ?: 1,
+                    updatedAtEpochMs = System.currentTimeMillis(),
+                ),
+            ),
+        )
+    }
+
+    suspend fun cacheBalances(balances: List<com.kiosk.erp.data.remote.ServerBalance>) {
+        val now = System.currentTimeMillis()
+        db.inventoryDao().upsertAll(
+            balances.map {
+                com.kiosk.erp.data.local.StockBalanceEntity(
+                    productId = it.productId,
+                    branchId = it.branchId,
                     sku = it.sku,
                     name = it.name,
-                    unit = it.unit,
-                    priceMinor = it.priceMinor,
-                    costMinor = it.costMinor,
-                    // Tax defaults from the branch config; refinement lands in Phase 4 sync.
-                    taxRateBp = 1600,
-                    taxInclusive = true,
-                    isStockTracked = true,
-                    version = it.version,
-                    updatedAtEpochMs = System.currentTimeMillis(),
+                    quantity = it.quantity,
+                    updatedAtEpochMs = now,
                 )
             },
         )
     }
+
+    private fun com.kiosk.erp.data.remote.ServerProduct.toEntity() = com.kiosk.erp.data.local.ProductEntity(
+        id = id,
+        sku = sku,
+        name = name,
+        unit = unit,
+        priceMinor = priceMinor,
+        costMinor = costMinor,
+        taxRateBp = taxRateBp,
+        taxInclusive = taxInclusive,
+        isStockTracked = true,
+        version = version,
+        updatedAtEpochMs = System.currentTimeMillis(),
+    )
 
     private fun isoNow(): String {
         val fmt = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", java.util.Locale.US)

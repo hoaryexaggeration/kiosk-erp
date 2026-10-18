@@ -7,6 +7,7 @@ import androidx.compose.material.icons.filled.PointOfSale
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.filled.VerifiedUser
+import androidx.compose.material.icons.filled.Warehouse
 import androidx.compose.material.icons.filled.Dashboard
 import androidx.compose.material3.Icon
 import androidx.compose.material3.NavigationBar
@@ -25,6 +26,7 @@ import androidx.navigation.compose.rememberNavController
 import com.kiosk.erp.di.AppContainer
 import com.kiosk.erp.ui.screens.CatalogScreen
 import com.kiosk.erp.ui.screens.DashboardScreen
+import com.kiosk.erp.ui.screens.InventoryScreen
 import com.kiosk.erp.ui.screens.LicenseScreen
 import com.kiosk.erp.ui.screens.PosScreen
 import com.kiosk.erp.ui.screens.SettingsScreen
@@ -36,6 +38,7 @@ private val tabs = listOf(
     Tab("dashboard", "Home", Icons.Filled.Dashboard),
     Tab("pos", "POS", Icons.Filled.PointOfSale),
     Tab("catalog", "Catalogue", Icons.Filled.Inventory2),
+    Tab("inventory", "Stock", Icons.Filled.Warehouse),
     Tab("sync", "Sync", Icons.Filled.Sync),
     Tab("license", "License", Icons.Filled.VerifiedUser),
     Tab("settings", "Setup", Icons.Filled.Settings),
@@ -75,6 +78,7 @@ fun KioskNavHost(container: AppContainer) {
             composable("dashboard") { DashboardScreen(viewModel(factory = factory)) }
             composable("pos") { PosScreen(viewModel(factory = factory)) }
             composable("catalog") { CatalogScreen(viewModel(factory = factory)) }
+            composable("inventory") { InventoryScreen(viewModel(factory = factory)) }
             composable("sync") { SyncCenterScreen(viewModel(factory = factory)) }
             composable("license") { LicenseScreen(viewModel(factory = factory)) }
             composable("settings") { SettingsScreen(viewModel(factory = factory)) }

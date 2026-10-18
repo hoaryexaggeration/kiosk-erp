@@ -104,3 +104,18 @@ data class SyncStateEntity(
     val serverReachable: Boolean,
     val lastError: String?,
 )
+
+/**
+ * Server-derived on-hand snapshot cached for offline reads. It is a projection, NOT the source of
+ * truth: the server owns stock (append-only movements). Local adjustments are queued in the outbox.
+ */
+@Entity(tableName = "stock_balances", primaryKeys = ["productId", "branchId"])
+data class StockBalanceEntity(
+    val productId: String,
+    val branchId: String,
+    val sku: String,
+    val name: String,
+    val quantity: Double,
+    val updatedAtEpochMs: Long,
+)
+

@@ -99,3 +99,18 @@ interface SyncStateDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(state: SyncStateEntity)
 }
+
+@Dao
+interface InventoryDao {
+    @Query("SELECT * FROM stock_balances ORDER BY name ASC")
+    fun observeBalances(): Flow<List<StockBalanceEntity>>
+
+    @Query("SELECT * FROM stock_balances WHERE productId = :productId LIMIT 1")
+    suspend fun byProduct(productId: String): StockBalanceEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertAll(balances: List<StockBalanceEntity>)
+
+    @Query("DELETE FROM stock_balances")
+    suspend fun clear()
+}

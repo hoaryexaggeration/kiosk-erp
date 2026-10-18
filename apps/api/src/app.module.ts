@@ -8,6 +8,8 @@ import { PermissionsGuard } from './modules/auth/permissions.guard';
 import { HealthModule } from './modules/health/health.module';
 import { DeviceModule } from './modules/devices/device.module';
 import { CatalogModule } from './modules/catalog/catalog.module';
+import { InventoryModule } from './modules/inventory/inventory.module';
+import { PricingModule } from './modules/pricing/pricing.module';
 import { SyncModule } from './modules/sync/sync.module';
 import { LicensingModule } from './modules/licensing/licensing.module';
 import { CorrelationMiddleware } from './common/correlation.middleware';
@@ -21,6 +23,8 @@ import { AllExceptionsFilter } from './common/all-exceptions.filter';
     HealthModule,
     DeviceModule,
     CatalogModule,
+    InventoryModule,
+    PricingModule,
     SyncModule,
     LicensingModule,
   ],

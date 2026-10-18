@@ -46,10 +46,11 @@ kiosk-erp/
 | 1 | Domain contracts + fixtures | ✅ `packages/domain-fixtures` (34 checks), sync protocol spec |
 | 2 | Backend foundation | ✅ NestJS API, Postgres migrations, auth/RBAC, devices, catalog, licensing (JWS ES256) |
 | 3 | Android shell, local DB, sync center | ✅ APK `artifacts/retail-erp-p03-v0.3.0.apk`; see `docs/operations/phase-03-apk-record.md` |
-| 4–12 | Catalogue/inventory → release candidate | ⏳ planned |
+| 4 | Catalogue, pricing/promotions, inventory | ✅ APK `artifacts/retail-erp-p04-v0.4.0.apk`; see `docs/operations/phase-04-apk-record.md` |
+| 5–12 | Full POS → release candidate | ⏳ planned |
 | 13 | Native iOS client | ⏳ scaffolded in `apps/ios/` |
 
-Verified locally: 17/17 API tests (unit + integration against Docker Postgres) and 34/34 fixture
+Verified locally: 26/26 API tests (unit + integration against Docker Postgres) and 34/34 fixture
 conformance checks. Android APK is built and signed (`assembleDebug`) inside Docker.
 
 ## Quick start

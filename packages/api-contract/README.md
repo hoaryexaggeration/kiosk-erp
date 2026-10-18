@@ -20,9 +20,17 @@ client and the NestJS backend.
 | `GET` | `/v1/devices` | List tenant devices (`admin.device.manage`) |
 | `POST` | `/v1/devices/enroll` | Enroll/renumber a device (`admin.device.manage`) |
 | `POST` | `/v1/devices/revoke` | Revoke a device + its tokens (`admin.device.manage`) |
-| `GET` | `/v1/products` | Cached catalogue paging |
+| `GET` | `/v1/products` | Cached catalogue paging (includes resolved tax rate) |
 | `POST` | `/v1/products` | Create product (`catalog.manage`) |
+| `PATCH` | `/v1/products/:id` | Update product with optimistic `expectedVersion` (`catalog.manage`) |
 | `GET` | `/v1/barcodes/:code` | Barcode → product |
+| `GET` | `/v1/tax-categories` | Tax categories (rate bp + inclusive) |
+| `POST` | `/v1/tax-categories` | Create tax category (`catalog.manage`) |
+| `GET` | `/v1/categories` | Product categories |
+| `POST` | `/v1/categories` | Create category (`catalog.manage`) |
+| `GET` | `/v1/pricing/resolve` | Resolve price for `productId`/`quantity` `asOf` a timestamp (dated promotions) |
+| `GET` | `/v1/inventory/balances` | Derived on-hand projection |
+| `GET` | `/v1/inventory/movements` | Append-only stock movement ledger |
 | `GET` | `/v1/config/snapshot` | Offline config snapshot |
 | `POST` | `/v1/sync/push` | Bounded command batch |
 | `GET` | `/v1/sync/pull` | Ordered deltas + cursor |

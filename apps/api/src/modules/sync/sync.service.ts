@@ -4,7 +4,10 @@ import { Database } from '../../db/database';
 import { DbService } from '../../db/db.service';
 import { AppError, SyncErrorCode } from '../../common/errors';
 import { EventsService } from '../platform/events.service';
+import { AuthService } from '../auth/auth.service';
 import { SaleService } from '../sales/sale.service';
+import { InventoryService } from '../inventory/inventory.service';
+import { StockAdjustmentSchema, StockReceiptSchema } from '../inventory/inventory.schema';
 import { CommandEnvelope, SalePayloadSchema } from './command.schema';
 import { AuthContext } from '../../common/auth-context';
 
@@ -19,25 +22,36 @@ export interface PushResult {
 
 const CURRENT_SCHEMA_VERSION = 1;
 
+/** Permission required to apply each synced aggregate (server-side, never the UI). */
+const REQUIRED_PERMISSION: Record<string, string> = {
+  Sale: 'pos.sale.create',
+  StockReceipt: 'inventory.receive',
+  StockAdjustment: 'inventory.adjust',
+};
+
 @Injectable()
 export class SyncService {
   private readonly logger = new Logger(SyncService.name);
 
   constructor(
     private readonly dbs: DbService,
+    private readonly auth: AuthService,
     private readonly saleService: SaleService,
+    private readonly inventoryService: InventoryService,
     private readonly events: EventsService,
   ) {}
 
   async push(ctx: AuthContext, correlationId: string, commands: CommandEnvelope[]): Promise<{ results: PushResult[] }> {
+    // Resolve the actor's permissions once per batch; a device token is not proof of authority.
+    const permissions = await this.auth.permissionsFor(ctx.userId);
     const results: PushResult[] = [];
     for (const command of commands) {
-      results.push(await this.pushOne(ctx, correlationId, command));
+      results.push(await this.pushOne(ctx, correlationId, command, permissions));
     }
     return { results };
   }
 
-  private async pushOne(ctx: AuthContext, correlationId: string, command: CommandEnvelope): Promise<PushResult> {
+  private async pushOne(ctx: AuthContext, correlationId: string, command: CommandEnvelope, permissions: string[]): Promise<PushResult> {
     // Session scope is authoritative; the client cannot choose tenant/device identities.
     if (command.tenantId && command.tenantId !== ctx.tenantId) {
       return { commandId: command.commandId, status: 'rejected', code: SyncErrorCode.TENANT_MISMATCH, message: 'Command tenant does not match session' };
@@ -47,6 +61,11 @@ export class SyncService {
     }
     if (command.schemaVersion > CURRENT_SCHEMA_VERSION) {
       return { commandId: command.commandId, status: 'rejected', code: SyncErrorCode.SCHEMA_UNSUPPORTED, message: `Server supports schemaVersion <= ${CURRENT_SCHEMA_VERSION}` };
+    }
+
+    const requiredPermission = REQUIRED_PERMISSION[command.aggregateType];
+    if (requiredPermission && !permissions.includes(requiredPermission)) {
+      return { commandId: command.commandId, status: 'rejected', code: 'FORBIDDEN', message: `Missing permission: ${requiredPermission}` };
     }
 
     try {
@@ -62,6 +81,21 @@ export class SyncService {
         }
 
         const outcome = await this.dispatch(trx, ctx, correlationId, command);
+
+        // Every conflict code becomes a durable, auditable exception (never a silent failure).
+        for (const code of new Set(outcome.conflictCodes ?? [])) {
+          await trx
+            .insertInto('conflict_cases')
+            .values({
+              tenant_id: ctx.tenantId,
+              command_id: command.commandId,
+              aggregate_type: command.aggregateType,
+              aggregate_id: command.aggregateId,
+              code,
+              detail: { result: (outcome.result ?? {}) as never } as never,
+            })
+            .execute();
+        }
 
         await trx
           .insertInto('processed_commands')
@@ -107,26 +141,43 @@ export class SyncService {
     ctx: AuthContext,
     correlationId: string,
     command: CommandEnvelope,
-  ): Promise<{ status: PushResult['status']; result?: Record<string, unknown>; code?: string; message?: string }> {
+  ): Promise<{ status: PushResult['status']; result?: Record<string, unknown>; code?: string; message?: string; conflictCodes?: string[] }> {
+    const commandCtx = {
+      tenantId: ctx.tenantId,
+      branchId: command.branchId,
+      deviceId: command.deviceId,
+      actorId: ctx.userId,
+      commandId: command.commandId,
+      correlationId,
+    };
+
     if (command.aggregateType === 'Sale') {
       const parsed = SalePayloadSchema.safeParse(command.payload);
       if (!parsed.success) {
         return { status: 'rejected', code: 'VALIDATION_ERROR', message: parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ') };
       }
-      const applied = await this.saleService.applySale(
-        trx,
-        {
-          tenantId: ctx.tenantId,
-          branchId: command.branchId,
-          deviceId: command.deviceId,
-          actorId: ctx.userId,
-          commandId: command.commandId,
-          correlationId,
-        },
-        parsed.data,
-      );
+      const applied = await this.saleService.applySale(trx, commandCtx, parsed.data);
+      return { status: applied.status, result: applied.result, conflictCodes: applied.conflictCodes };
+    }
+
+    if (command.aggregateType === 'StockReceipt') {
+      const parsed = StockReceiptSchema.safeParse(command.payload);
+      if (!parsed.success) {
+        return { status: 'rejected', code: 'VALIDATION_ERROR', message: parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ') };
+      }
+      const applied = await this.inventoryService.receiveStock(trx, commandCtx, parsed.data);
       return { status: applied.status, result: applied.result };
     }
+
+    if (command.aggregateType === 'StockAdjustment') {
+      const parsed = StockAdjustmentSchema.safeParse(command.payload);
+      if (!parsed.success) {
+        return { status: 'rejected', code: 'VALIDATION_ERROR', message: parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ') };
+      }
+      const applied = await this.inventoryService.adjustStock(trx, commandCtx, parsed.data);
+      return { status: applied.status, result: applied.result, conflictCodes: applied.conflictCodes };
+    }
+
     return { status: 'rejected', code: 'UNSUPPORTED_AGGREGATE', message: `Unsupported aggregateType: ${command.aggregateType}` };
   }
 

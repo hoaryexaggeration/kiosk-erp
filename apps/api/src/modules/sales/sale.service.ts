@@ -3,6 +3,8 @@ import { Kysely, sql } from 'kysely';
 import { Database } from '../../db/database';
 import { computeLine, computeDocument } from '../../domain/pricing';
 import { EventsService } from '../platform/events.service';
+import { InventoryService } from '../inventory/inventory.service';
+import { PricingService } from '../pricing/pricing.service';
 import { SalePayload } from '../sync/command.schema';
 
 export interface SaleApplyContext {
@@ -20,13 +22,15 @@ export interface SaleApplyResult {
   conflictCodes: string[];
 }
 
-const DEFAULT_LOCATION_NAME = 'Store';
-
 @Injectable()
 export class SaleService {
   private readonly logger = new Logger(SaleService.name);
 
-  constructor(private readonly events: EventsService) {}
+  constructor(
+    private readonly events: EventsService,
+    private readonly inventory: InventoryService,
+    private readonly pricing: PricingService,
+  ) {}
 
   /**
    * Apply a Sale command inside a single transaction (§5 write path, §1.6 rule 2).
@@ -117,6 +121,18 @@ export class SaleService {
       lineRows.map((l) => ({ unitPriceMinor: l.unitPriceMinor, quantity: l.quantity, discountBp: l.discountBp, taxRateBp: l.taxRateBp, taxInclusive: l.taxInclusive })),
     );
     const costTotalMinor = lineRows.reduce((s, l) => s + l.costMinor, 0);
+
+    // --- price-snapshot review (dated promotions, §13 pricing snapshots) --------------
+    // We keep the sale-time price the till actually charged and only flag divergence; we never
+    // silently re-price a completed sale.
+    const priceAsOf = sale.clientCreatedAt ? new Date(sale.clientCreatedAt) : new Date();
+    for (const l of lineRows) {
+      if (!l.productId) continue;
+      const resolved = await this.pricing.resolvePrice(trx, ctx.tenantId, l.productId, l.quantity, priceAsOf);
+      if (resolved && resolved.source === 'promotion' && resolved.unitPriceMinor !== l.unitPriceMinor) {
+        warnings.push(`STALE_PRICE_SNAPSHOT ${l.sku}: charged ${l.unitPriceMinor}, policy ${resolved.unitPriceMinor}`);
+      }
+    }
 
     // --- validate tenders -----------------------------------------------------------
     const tenderSum = sale.tenders.reduce((s, t) => s + t.amountMinor, 0);
@@ -230,44 +246,27 @@ export class SaleService {
     // --- stock movements (append-only) + projection ---------------------------------
     const trackingLines = lineRows.filter((l) => l.stockTracked && l.productId);
     if (trackingLines.length > 0) {
-      const locationId = await this.getOrCreateLocation(trx, ctx.tenantId, ctx.branchId);
+      const locationId = await this.inventory.getOrCreateLocation(trx, ctx.tenantId, ctx.branchId);
+      const negatives: string[] = [];
       for (const l of trackingLines) {
-        await trx
-          .insertInto('inventory_movements')
-          .values({
-            id: crypto.randomUUID(),
-            tenant_id: ctx.tenantId,
-            branch_id: ctx.branchId,
-            location_id: locationId,
-            product_id: l.productId as string,
-            quantity_delta: -l.quantity,
-            unit: l.unit,
-            reason: 'sale',
-            source_type: 'sale',
-            source_id: sale.id,
-            actor_id: ctx.actorId,
-            device_id: ctx.deviceId,
-            command_id: ctx.commandId,
-          })
-          .execute();
-
-        await sql`
-          INSERT INTO stock_balances (tenant_id, branch_id, location_id, product_id, quantity, updated_at)
-          VALUES (${ctx.tenantId}, ${ctx.branchId}, ${locationId}, ${l.productId}, ${-l.quantity}, now())
-          ON CONFLICT (tenant_id, branch_id, location_id, product_id)
-          DO UPDATE SET quantity = stock_balances.quantity + EXCLUDED.quantity, updated_at = now()
-        `.execute(trx);
+        const resulting = await this.inventory.applyMovement(trx, {
+          tenantId: ctx.tenantId,
+          branchId: ctx.branchId,
+          locationId,
+          productId: l.productId as string,
+          quantityDelta: -l.quantity,
+          unit: l.unit,
+          reason: 'sale',
+          sourceType: 'sale',
+          sourceId: sale.id,
+          actorId: ctx.actorId,
+          deviceId: ctx.deviceId,
+          commandId: ctx.commandId,
+        });
+        if (resulting < 0) negatives.push(l.productId as string);
       }
 
       // Detect negative stock and raise a visible conflict (do not hide facts).
-      const negatives = await trx
-        .selectFrom('stock_balances')
-        .select(['product_id', 'quantity'])
-        .where('tenant_id', '=', ctx.tenantId)
-        .where('branch_id', '=', ctx.branchId)
-        .where('product_id', 'in', trackingLines.map((l) => l.productId as string))
-        .where('quantity', '<', 0)
-        .execute();
       if (negatives.length > 0) {
         conflictCodes.push('NEGATIVE_STOCK');
         warnings.push(`Negative stock on ${negatives.length} product(s) after independent offline sales`);
@@ -295,20 +294,8 @@ export class SaleService {
     if (glWarning) warnings.push(glWarning);
 
     // --- platform records -----------------------------------------------------------
-    for (const code of new Set(conflictCodes)) {
-      await trx
-        .insertInto('conflict_cases')
-        .values({
-          tenant_id: ctx.tenantId,
-          command_id: ctx.commandId,
-          aggregate_type: 'Sale',
-          aggregate_id: sale.id,
-          code,
-          detail: { saleId: sale.id, warnings } as never,
-        })
-        .execute();
-    }
-
+    // Conflict cases for `conflictCodes` are created centrally by the sync layer so every
+    // aggregate type gets identical, auditable exception handling.
     await this.events.audit(trx, {
       tenantId: ctx.tenantId,
       branchId: ctx.branchId,
@@ -343,22 +330,6 @@ export class SaleService {
       },
       conflictCodes: Array.from(new Set(conflictCodes)),
     };
-  }
-
-  private async getOrCreateLocation(trx: Kysely<Database>, tenantId: string, branchId: string): Promise<string> {
-    const existing = await trx
-      .selectFrom('stock_locations')
-      .select('id')
-      .where('tenant_id', '=', tenantId)
-      .where('branch_id', '=', branchId)
-      .executeTakeFirst();
-    if (existing) return existing.id;
-    const row = await trx
-      .insertInto('stock_locations')
-      .values({ tenant_id: tenantId, branch_id: branchId, name: DEFAULT_LOCATION_NAME, kind: 'store' })
-      .returning('id')
-      .executeTakeFirstOrThrow();
-    return row.id;
   }
 
   /**

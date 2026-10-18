@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import com.kiosk.erp.data.local.OutboxEntity
 import com.kiosk.erp.data.local.ProductEntity
 import com.kiosk.erp.data.local.SaleEntity
+import com.kiosk.erp.data.local.StockBalanceEntity
 import com.kiosk.erp.data.local.SyncStateEntity
 import com.kiosk.erp.data.repository.CartLine
 import com.kiosk.erp.di.AppContainer
@@ -163,6 +164,55 @@ class PosViewModel(private val container: AppContainer) : ViewModel() {
     }
 }
 
+class InventoryViewModel(private val container: AppContainer) : ViewModel() {
+    val balances: StateFlow<List<StockBalanceEntity>> = container.inventoryRepository.observeBalances()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+    val products: StateFlow<List<ProductEntity>> = container.database.productDao().observeAll()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    private val _message = MutableStateFlow<String?>(null)
+    val message: StateFlow<String?> = _message
+
+    fun refresh() {
+        viewModelScope.launch {
+            val session = container.sessionStore.current()
+            if (!session.isAuthenticated) {
+                _message.value = "Sign in first (Settings) to pull stock"
+                return@launch
+            }
+            runCatching { container.api.inventoryBalances(session.apiBaseUrl, session.accessToken!!) }
+                .onSuccess {
+                    container.saleRepository.cacheBalances(it)
+                    _message.value = "Refreshed ${it.size} balances from server"
+                }
+                .onFailure { _message.value = "Refresh failed: ${it.message}" }
+        }
+    }
+
+    /** Queue an adjustment offline. Reason is required; the movement posts on the next sync. */
+    fun adjust(product: ProductEntity, quantityDelta: Double, reason: String) {
+        viewModelScope.launch {
+            if (quantityDelta == 0.0) {
+                _message.value = "Enter a non-zero quantity delta"
+                return@launch
+            }
+            if (reason.isBlank()) {
+                _message.value = "A reason is required for an adjustment"
+                return@launch
+            }
+            val session = container.sessionStore.current()
+            val branchId = session.branchId ?: "22222222-2222-4222-8222-222222222222"
+            val deviceId = session.deviceId ?: "00000000-0000-4000-8000-000000000000"
+            container.inventoryRepository.createAdjustment(product.id, product.sku, product.name, quantityDelta, reason.trim(), branchId, deviceId)
+            _message.value = "Queued ${if (quantityDelta > 0) "+" else ""}$quantityDelta ${product.sku} • waiting to sync"
+        }
+    }
+
+    fun clearMessage() {
+        _message.value = null
+    }
+}
+
 class LicenseViewModel : ViewModel() {
     private val _result = MutableStateFlow<LicensePayload?>(null)
     val result: StateFlow<LicensePayload?> = _result
@@ -265,6 +315,7 @@ class KioskViewModelFactory(private val container: AppContainer) : ViewModelProv
         modelClass.isAssignableFrom(DashboardViewModel::class.java) -> DashboardViewModel(container)
         modelClass.isAssignableFrom(SyncViewModel::class.java) -> SyncViewModel(container)
         modelClass.isAssignableFrom(CatalogViewModel::class.java) -> CatalogViewModel(container)
+        modelClass.isAssignableFrom(InventoryViewModel::class.java) -> InventoryViewModel(container)
         modelClass.isAssignableFrom(PosViewModel::class.java) -> PosViewModel(container)
         modelClass.isAssignableFrom(LicenseViewModel::class.java) -> LicenseViewModel()
         modelClass.isAssignableFrom(SettingsViewModel::class.java) -> SettingsViewModel(container)
