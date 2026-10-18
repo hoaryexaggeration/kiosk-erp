@@ -86,7 +86,7 @@ fun PosScreen(vm: PosViewModel) {
 
         if (scanning) {
             BarcodeScannerOverlay(
-                onCode = { code -> vm.onBarcode(code) },
+                onCode = { code, onOutcome -> vm.onBarcode(code, onOutcome) },
                 onDismiss = { scanning = false },
             )
         }

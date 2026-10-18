@@ -2,24 +2,26 @@ package com.kiosk.erp.feature.pos
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.util.Log
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
+import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
+import androidx.camera.core.resolutionselector.AspectRatioStrategy
+import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
@@ -42,22 +44,26 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
+import com.google.mlkit.vision.barcode.BarcodeScanner
 import com.google.mlkit.vision.barcode.BarcodeScannerOptions
 import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.common.InputImage
 import java.util.concurrent.Executors
-import java.util.concurrent.atomic.AtomicReference
 
 /**
  * Full-screen offline barcode scanner (§5 POS).
  *
  * Uses the BUNDLED ML Kit model, so a scan needs no network and no Google Play Services. The POS
  * keeps a manual-entry path because a device may have no usable camera (or the code may be damaged).
+ *
+ * `onCode` resolves the code and reports the outcome: `true` means the code was handled and the
+ * scanner closes; `false` keeps it open and shows the reason, so a scan never looks like nothing
+ * happened.
  */
 @Composable
 fun BarcodeScannerOverlay(
-    onCode: (String) -> Unit,
+    onCode: (String, (Boolean) -> Unit) -> Unit,
     onDismiss: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -67,15 +73,37 @@ fun BarcodeScannerOverlay(
         )
     }
     var manualEntry by remember { mutableStateOf(false) }
+    var status by remember { mutableStateOf<String?>(null) }
+    var lastCode by remember { mutableStateOf<String?>(null) }
+    var resolving by remember { mutableStateOf(false) }
     val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted = it }
 
     LaunchedEffect(Unit) {
         if (!granted) launcher.launch(Manifest.permission.CAMERA)
     }
 
+    fun resolve(code: String) {
+        if (resolving || code.isBlank()) return
+        resolving = true
+        status = null
+        onCode(code) { handled ->
+            resolving = false
+            if (handled) {
+                onDismiss()
+            } else {
+                status = "No product matches $code. Refresh the catalogue if it is new."
+            }
+        }
+    }
+
     Box(Modifier.fillMaxSize().background(Color.Black)) {
         if (granted) {
-            CameraPreview(Modifier.fillMaxSize(), onBarcode = onCode)
+            CameraPreview(Modifier.fillMaxSize()) { code ->
+                if (code != lastCode) {
+                    lastCode = code
+                    resolve(code)
+                }
+            }
         } else {
             Text(
                 "Camera permission is required to scan. Use manual entry instead.",
@@ -88,12 +116,14 @@ fun BarcodeScannerOverlay(
             color = Color.Black.copy(alpha = 0.55f),
             modifier = Modifier.align(Alignment.TopCenter).fillMaxWidth(),
         ) {
-            Text(
-                if (granted) "Point the camera at the barcode" else "Camera unavailable",
-                color = Color.White,
-                fontWeight = FontWeight.SemiBold,
-                modifier = Modifier.padding(16.dp),
-            )
+            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(
+                    if (granted) "Point the camera at the barcode" else "Camera unavailable",
+                    color = Color.White,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                status?.let { Text(it, color = Color(0xFFFFCC80)) }
+            }
         }
 
         Column(
@@ -109,7 +139,7 @@ fun BarcodeScannerOverlay(
         ManualCodeDialog(
             onSubmit = {
                 manualEntry = false
-                onCode(it)
+                resolve(it)
             },
             onDismiss = { manualEntry = false },
         )
@@ -137,6 +167,8 @@ private fun ManualCodeDialog(onSubmit: (String) -> Unit, onDismiss: () -> Unit) 
     )
 }
 
+private const val TAG = "KioskBarcodeScanner"
+
 @Composable
 private fun CameraPreview(modifier: Modifier, onBarcode: (String) -> Unit) {
     val context = LocalContext.current
@@ -146,8 +178,6 @@ private fun CameraPreview(modifier: Modifier, onBarcode: (String) -> Unit) {
     }
     val executor = remember { Executors.newSingleThreadExecutor() }
     val currentOnBarcode by rememberUpdatedState(onBarcode)
-    // Guards against firing the same code repeatedly while it stays in frame.
-    val lastCode = remember { AtomicReference<String?>(null) }
 
     val scanner = remember {
         BarcodeScanning.getClient(
@@ -159,6 +189,9 @@ private fun CameraPreview(modifier: Modifier, onBarcode: (String) -> Unit) {
                     Barcode.FORMAT_UPC_E,
                     Barcode.FORMAT_CODE_128,
                     Barcode.FORMAT_CODE_39,
+                    Barcode.FORMAT_CODE_93,
+                    Barcode.FORMAT_ITF,
+                    Barcode.FORMAT_CODABAR,
                     Barcode.FORMAT_QR_CODE,
                 )
                 .build(),
@@ -180,31 +213,46 @@ private fun CameraPreview(modifier: Modifier, onBarcode: (String) -> Unit) {
             {
                 val provider = providerFuture.get()
                 val preview = Preview.Builder().build().also { it.setSurfaceProvider(previewView.surfaceProvider) }
+                // A higher analysis resolution than the 640x480 default matters a lot for small retail
+                // barcodes; 16:9 falls back to whatever the device actually supports.
                 val analysis = ImageAnalysis.Builder()
+                    .setResolutionSelector(
+                        ResolutionSelector.Builder()
+                            .setAspectRatioStrategy(AspectRatioStrategy.RATIO_16_9_FALLBACK_AUTO_STRATEGY)
+                            .build(),
+                    )
                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                     .build()
-                analysis.setAnalyzer(executor) { imageProxy ->
-                    val mediaImage = imageProxy.image
-                    if (mediaImage == null) {
-                        imageProxy.close()
-                        return@setAnalyzer
-                    }
-                    val input = InputImage.fromMediaImage(mediaImage, imageProxy.imageInfo.rotationDegrees)
-                    scanner.process(input)
-                        .addOnSuccessListener { barcodes ->
-                            val value = barcodes.firstOrNull { !it.rawValue.isNullOrBlank() }?.rawValue
-                            if (value != null && lastCode.getAndSet(value) != value) {
-                                previewView.post { currentOnBarcode(value) }
-                            }
-                        }
-                        .addOnCompleteListener { imageProxy.close() }
-                }
-                runCatching {
+                analysis.setAnalyzer(executor) { imageProxy -> analyse(scanner, imageProxy, currentOnBarcode) }
+                try {
                     provider.unbindAll()
                     provider.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis)
+                } catch (err: Exception) {
+                    // Never fail silently: an unbound camera used to look like "nothing is happening".
+                    Log.w(TAG, "Camera bind failed", err)
                 }
             },
             ContextCompat.getMainExecutor(context),
         )
     }
+}
+
+@Suppress("UnsafeOptInUsageError")
+private fun analyse(
+    scanner: BarcodeScanner,
+    imageProxy: ImageProxy,
+    onBarcode: (String) -> Unit,
+) {
+    val mediaImage = imageProxy.image
+    if (mediaImage == null) {
+        imageProxy.close()
+        return
+    }
+    val input = InputImage.fromMediaImage(mediaImage, imageProxy.imageInfo.rotationDegrees)
+    scanner.process(input)
+        .addOnSuccessListener { barcodes ->
+            barcodes.firstOrNull { !it.rawValue.isNullOrBlank() }?.rawValue?.let(onBarcode)
+        }
+        .addOnFailureListener { err -> Log.w(TAG, "Barcode analysis failed", err) }
+        .addOnCompleteListener { imageProxy.close() }
 }

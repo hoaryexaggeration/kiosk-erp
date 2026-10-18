@@ -50,17 +50,23 @@ class PosViewModel(
 
     /**
      * Resolve a scanned (or manually entered) barcode against the LOCAL cache and add it to the cart.
-     * Fully offline: an unknown code is reported, never queued as a guess.
+     * Fully offline: an unknown code is reported, never queued as a guess. `onOutcome(true)` means the
+     * code was resolved and the scanner should close.
      */
-    fun onBarcode(code: String) {
-        if (code.isBlank()) return
+    fun onBarcode(code: String, onOutcome: (Boolean) -> Unit) {
+        if (code.isBlank()) {
+            onOutcome(false)
+            return
+        }
         viewModelScope.launch {
             val product = productRepository.findByBarcode(code)
             if (product == null) {
                 _message.value = "No product matches barcode $code — refresh the catalogue if it is new."
+                onOutcome(false)
             } else {
                 addProduct(product)
                 _message.value = "Added ${product.name}"
+                onOutcome(true)
             }
         }
     }
