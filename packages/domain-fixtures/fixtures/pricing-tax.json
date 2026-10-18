@@ -1,0 +1,43 @@
+{
+  "$comment": "Deterministic pricing/tax vectors. All money is integer MINOR units (KES cents). Tax and discount rates are basis points (1/100 of a percent). Rounding is half-up to the nearest minor unit at the line level; document totals are sums of line values. Implemented identically in TypeScript and Kotlin.",
+  "schemaVersion": 1,
+  "currency": "KES",
+  "rounding": "half_up",
+  "lines": [
+    {
+      "id": "exclusive-simple",
+      "input": { "unitPriceMinor": 10000, "quantity": 2, "discountBp": 0, "taxRateBp": 1600, "taxInclusive": false },
+      "expected": { "grossMinor": 20000, "discountMinor": 0, "netMinor": 20000, "taxMinor": 3200, "lineTotalMinor": 23200 }
+    },
+    {
+      "id": "inclusive-simple",
+      "input": { "unitPriceMinor": 11600, "quantity": 1, "discountBp": 0, "taxRateBp": 1600, "taxInclusive": true },
+      "expected": { "grossMinor": 11600, "discountMinor": 0, "netMinor": 10000, "taxMinor": 1600, "lineTotalMinor": 11600 }
+    },
+    {
+      "id": "exclusive-with-discount",
+      "input": { "unitPriceMinor": 10000, "quantity": 3, "discountBp": 1000, "taxRateBp": 1600, "taxInclusive": false },
+      "expected": { "grossMinor": 30000, "discountMinor": 3000, "netMinor": 27000, "taxMinor": 4320, "lineTotalMinor": 31320 }
+    },
+    {
+      "id": "rounding-edge-tax",
+      "input": { "unitPriceMinor": 333, "quantity": 3, "discountBp": 0, "taxRateBp": 1600, "taxInclusive": false },
+      "expected": { "grossMinor": 999, "discountMinor": 0, "netMinor": 999, "taxMinor": 160, "lineTotalMinor": 1159 }
+    },
+    {
+      "id": "rounding-sub-minor-tax",
+      "input": { "unitPriceMinor": 1, "quantity": 1, "discountBp": 0, "taxRateBp": 1600, "taxInclusive": false },
+      "expected": { "grossMinor": 1, "discountMinor": 0, "netMinor": 1, "taxMinor": 0, "lineTotalMinor": 1 }
+    }
+  ],
+  "documents": [
+    {
+      "id": "doc-exclusive-two-lines",
+      "lines": [
+        { "unitPriceMinor": 10000, "quantity": 2, "discountBp": 0, "taxRateBp": 1600, "taxInclusive": false },
+        { "unitPriceMinor": 11600, "quantity": 1, "discountBp": 0, "taxRateBp": 1600, "taxInclusive": true }
+      ],
+      "expected": { "subtotalMinor": 30000, "taxTotalMinor": 4800, "totalMinor": 34800 }
+    }
+  ]
+}

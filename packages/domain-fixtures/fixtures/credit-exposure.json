@@ -1,0 +1,31 @@
+{
+  "$comment": "Offline credit-exposure policy vectors. Rule (deterministic): a credit sale is `review_required` if (a) the device is offline and the sale exceeds the configured offline cap, OR (b) balance + sale exceeds the credit limit. Otherwise `allowed`. Offline breaches are never silently applied; they raise a visible exception (architecture §6, §2.E).",
+  "schemaVersion": 1,
+  "cases": [
+    {
+      "id": "offline-under-limit-under-cap",
+      "input": { "online": false, "creditLimitMinor": 100000, "currentBalanceMinor": 90000, "offlineCapMinor": 20000, "newSaleMinor": 5000 },
+      "expected": "allowed"
+    },
+    {
+      "id": "offline-under-cap-but-over-limit",
+      "input": { "online": false, "creditLimitMinor": 100000, "currentBalanceMinor": 90000, "offlineCapMinor": 20000, "newSaleMinor": 15000 },
+      "expected": "review_required"
+    },
+    {
+      "id": "offline-over-cap",
+      "input": { "online": false, "creditLimitMinor": 1000000, "currentBalanceMinor": 0, "offlineCapMinor": 20000, "newSaleMinor": 25000 },
+      "expected": "review_required"
+    },
+    {
+      "id": "online-under-limit",
+      "input": { "online": true, "creditLimitMinor": 100000, "currentBalanceMinor": 10000, "offlineCapMinor": 20000, "newSaleMinor": 5000 },
+      "expected": "allowed"
+    },
+    {
+      "id": "online-over-limit",
+      "input": { "online": true, "creditLimitMinor": 100000, "currentBalanceMinor": 98000, "offlineCapMinor": 20000, "newSaleMinor": 5000 },
+      "expected": "review_required"
+    }
+  ]
+}

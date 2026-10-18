@@ -1,0 +1,11 @@
+{
+  "name": "@kiosk/domain-fixtures",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Language-neutral JSON conformance fixtures for money/tax rounding, discounts, credit exposure and sync/sale state machines. Consumed identically by TypeScript and Kotlin (and Swift in Phase 13).",
+  "main": "src/index.mjs",
+  "scripts": {
+    "check": "node scripts/check.mjs"
+  }
+}

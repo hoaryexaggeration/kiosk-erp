@@ -1,0 +1,24 @@
+{
+  "name": "kiosk-erp",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Offline-first native retail ERP/POS — Android first, cloud sync/control plane, deferred native iOS client.",
+  "workspaces": [
+    "apps/api",
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "api:dev": "npm --workspace apps/api run start:dev",
+    "api:build": "npm --workspace apps/api run build",
+    "api:test": "npm --workspace apps/api run test",
+    "api:migrate": "npm --workspace apps/api run migration:run",
+    "fixtures:check": "node packages/domain-fixtures/scripts/check.mjs",
+    "db:up": "docker compose -f infra/docker/docker-compose.yml up -d postgres",
+    "db:down": "docker compose -f infra/docker/docker-compose.yml down",
+    "android:build": "bash infra/docker/android/build-apk.sh",
+    "verify": "npm run fixtures:check && npm run api:test"
+  }
+}

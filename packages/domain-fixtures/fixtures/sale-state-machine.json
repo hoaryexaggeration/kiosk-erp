@@ -1,0 +1,24 @@
+{
+  "$comment": "Sale lifecycle state machine + sync outcome mapping. `transitions` lists allowed target states from each state. A client must not invent a transition. Terminal states have no outgoing transitions.",
+  "schemaVersion": 1,
+  "initialState": "draft",
+  "transitions": {
+    "draft": ["pending_sync", "voided"],
+    "pending_sync": ["accepted", "rejected", "conflict", "review_required"],
+    "rejected": [],
+    "conflict": ["accepted", "rejected"],
+    "review_required": ["accepted", "rejected"],
+    "accepted": ["partially_refunded", "refunded"],
+    "partially_refunded": ["refunded"],
+    "refunded": [],
+    "voided": []
+  },
+  "pushResultToState": {
+    "accepted": "accepted",
+    "duplicate": "accepted",
+    "retryable": "pending_sync",
+    "rejected": "rejected",
+    "conflict": "conflict",
+    "review_required": "review_required"
+  }
+}

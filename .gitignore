@@ -1,0 +1,45 @@
+# Dependencies
+node_modules/
+**/node_modules/
+
+# Build output
+dist/
+build/
+out/
+*.tsbuildinfo
+
+# Android
+apps/android/.gradle/
+apps/android/local.properties
+apps/android/**/build/
+apps/android/.idea/
+apps/android/captures/
+*.apk
+*.aab
+!infra/docker/android/**/*.apk
+
+# iOS
+apps/ios/**/DerivedData/
+apps/ios/**/*.xcuserstate
+apps/ios/Pods/
+apps/ios/.build/
+
+# Env / secrets — NEVER commit real secrets or private keys
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+.secrets/
+!infra/docker/android/**/*.key
+!packages/**/fixtures/**/*.key
+
+# Runtime / local artifacts
+artifacts/
+coverage/
+*.log
+.DS_Store
+/tmp/
+
+# Docker
+infra/docker/data/

@@ -1,0 +1,6 @@
+{
+  "name": "@kiosk/integration-contracts",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Provider mapping specs and mock fixtures for eTIMS, M-PESA and future integrations (Phase 10)."
+}

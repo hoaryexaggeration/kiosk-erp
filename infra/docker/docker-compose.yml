@@ -1,0 +1,40 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: kiosk-erp-postgres
+    environment:
+      POSTGRES_USER: kiosk
+      POSTGRES_PASSWORD: kiosk
+      POSTGRES_DB: kiosk_erp
+    ports:
+      - '5432:5432'
+    volumes:
+      - kiosk-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U kiosk -d kiosk_erp']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    profiles: ['full']
+    build:
+      context: ../..
+      dockerfile: infra/docker/api/Dockerfile
+    environment:
+      NODE_ENV: development
+      PORT: '3000'
+      DATABASE_URL: postgres://kiosk:kiosk@postgres:5432/kiosk_erp
+      JWT_SECRET: dev-only-change-me-please-0123456789abcdef
+      LICENSE_SIGNING_PRIVATE_KEY_PATH: /secrets/license-signing.key.pem
+      LICENSE_SIGNING_PUBLIC_KEY_PATH: /secrets/license-signing.pub.pem
+    ports:
+      - '3000:3000'
+    volumes:
+      - ./secrets:/secrets:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  kiosk-pgdata:

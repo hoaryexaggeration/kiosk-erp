@@ -1,0 +1,43 @@
+{
+  "name": "@kiosk/api",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Kiosk ERP cloud sync/control plane (NestJS modular monolith).",
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "start": "node dist/main.js",
+    "start:dev": "ts-node -r tsconfig-paths/register src/main.ts",
+    "test": "jest --runInBand",
+    "test:unit": "jest --runInBand --testPathPattern=tests/unit",
+    "test:integration": "jest --runInBand --testPathPattern=tests/integration",
+    "migration:run": "ts-node src/db/run-migrations.ts",
+    "seed:dev": "ts-node src/db/seed-dev.ts",
+    "licensing:keys": "ts-node src/modules/licensing/generate-dev-keys.ts"
+  },
+  "dependencies": {
+    "@nestjs/common": "^11.0.1",
+    "@nestjs/core": "^11.0.1",
+    "@nestjs/platform-express": "^11.0.1",
+    "dotenv": "^16.4.7",
+    "jose": "^5.9.6",
+    "kysely": "^0.27.6",
+    "pg": "^8.13.1",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.1",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@nestjs/testing": "^11.0.1",
+    "@types/express": "^5.0.0",
+    "@types/jest": "^29.5.14",
+    "@types/node": "^22.10.5",
+    "@types/pg": "^8.11.10",
+    "@types/supertest": "^6.0.2",
+    "jest": "^29.7.0",
+    "supertest": "^7.0.0",
+    "ts-jest": "^29.2.5",
+    "ts-node": "^10.9.2",
+    "tsconfig-paths": "^4.2.0",
+    "typescript": "^5.7.3"
+  }
+}
