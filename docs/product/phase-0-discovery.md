@@ -73,7 +73,7 @@ Taken verbatim from §2 of the architecture and adopted as the MVP contract. Key
 
 - ⚠ KRA eTIMS onboarding path (eTIMS Client / VSCU / OSCU) — **must be confirmed with KRA/integrator** before Phase 10.
 - ⚠ Chart of accounts, tax treatment, fiscal year, opening balances — **accountant sign-off** before Phase 8 (`docs/accounting/posting-matrix.md`).
-- ⚠ Cost method: weighted average assumed (ADR 0006); confirm FIFO requirement.
+- ✔ Cost method: **FIFO with valuation layers** confirmed by the owner (§18.5, 19 Oct 2026) — ADR 0009.
 - ⚠ Kenya DPA 2019 / ODPC obligations — legal review (`docs/compliance/`).
 
 ## 7. Commercial model (adopted)

@@ -175,6 +175,8 @@ export interface InventoryMovementsTable {
   command_id: string | null;
   approved_by: string | null;
   approval_note: string | null;
+  /** Derived FIFO cost of an outbound movement (ADR 0009); null for inbound. */
+  cogs_minor: number | null;
   occurred_at: Generated<Date>;
   created_at: Generated<Date>;
 }
@@ -198,6 +200,31 @@ export interface StockBalancesTable {
   product_id: string;
   quantity: Generated<number>;
   updated_at: Generated<Date>;
+}
+/** A receipt tranche consumed oldest-first (FIFO). */
+export interface InventoryValuationLayersTable {
+  id: string;
+  tenant_id: string;
+  branch_id: string;
+  location_id: string;
+  product_id: string;
+  source_movement_id: string | null;
+  unit_cost_minor: number;
+  quantity_received: number;
+  quantity_remaining: number;
+  received_at: Generated<Date>;
+  created_at: Generated<Date>;
+}
+/** Which layers paid for an outbound movement, and how much. */
+export interface InventoryCostAllocationsTable {
+  id: string;
+  tenant_id: string;
+  movement_id: string;
+  layer_id: string;
+  quantity: number;
+  unit_cost_minor: number;
+  amount_minor: number;
+  created_at: Generated<Date>;
 }
 export interface CashSessionsTable {
   id: string;
@@ -473,6 +500,8 @@ export interface Database {
   inventory_movements: InventoryMovementsTable;
   promotions: PromotionsTable;
   stock_balances: StockBalancesTable;
+  inventory_valuation_layers: InventoryValuationLayersTable;
+  inventory_cost_allocations: InventoryCostAllocationsTable;
   cash_sessions: CashSessionsTable;
   cash_movements: CashMovementsTable;
   sales: SalesTable;

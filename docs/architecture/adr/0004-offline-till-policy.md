@@ -1,8 +1,14 @@
 # ADR 0004 — Multi-device offline policy (MVP)
 
-- **Status:** Accepted (MVP scope; revisitable in Phase 9)
-- **Date:** 2026-10-18
+- **Status:** **Superseded in scope by ADR 0010** (branch edge gateway). Retained for the reasoning.
+- **Date:** 2026-10-18 (amended 2026-10-19)
 - **Phase:** 0 decision, enforced in 4–5
+
+> **Amendment (2026-10-19).** The owner's §18 answers chose multiple branches from day one, multiple
+> tills per branch and a **branch edge gateway** — i.e. option 3 below, previously scoped out of the
+> MVP. ADR 0010 now governs the multi-device policy. This ADR's warning still holds and is the reason
+> the gateway (not "trust the phones") is the chosen answer: independent devices must never be assumed
+> to share a register.
 
 ## Context
 

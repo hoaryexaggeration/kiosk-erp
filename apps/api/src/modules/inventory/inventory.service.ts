@@ -30,6 +30,26 @@ export interface ApplyMovement {
   commandId?: string | null;
   approvedBy?: string | null;
   approvalNote?: string | null;
+  /** Inbound only: the cost that opens a FIFO valuation layer (ADR 0009). */
+  unitCostMinor?: number;
+}
+
+export interface MovementResult {
+  /** Resulting on-hand quantity (derived projection). */
+  quantity: number;
+  /** FIFO cost consumed by an outbound movement; 0 for inbound. */
+  cogsMinor: number;
+  /** Outbound quantity with no layer to draw on — i.e. stock went negative. */
+  uncostedQuantity: number;
+}
+
+/** Normalised outcome of applying an inventory aggregate through the sync command path. */
+export interface ApplyResult {
+  status: 'accepted' | 'review_required' | 'rejected';
+  result?: Record<string, unknown>;
+  code?: string;
+  message?: string;
+  conflictCodes?: string[];
 }
 
 const DEFAULT_LOCATION_NAME = 'Store';
@@ -62,12 +82,34 @@ export class InventoryService {
     return row.id;
   }
 
-  /** Append a movement and update the derived balance. Returns the resulting on-hand quantity. */
-  async applyMovement(trx: Kysely<Database>, m: ApplyMovement): Promise<number> {
+  /** Current on-hand for a product at a location (derived projection, never authoritative). */
+  async onHand(trx: Kysely<Database>, tenantId: string, branchId: string, locationId: string, productId: string): Promise<number> {
+    const row = await trx
+      .selectFrom('stock_balances')
+      .select('quantity')
+      .where('tenant_id', '=', tenantId)
+      .where('branch_id', '=', branchId)
+      .where('location_id', '=', locationId)
+      .where('product_id', '=', productId)
+      .executeTakeFirst();
+    return Number(row?.quantity ?? 0);
+  }
+
+  /**
+   * The single write path for on-hand stock. Appends the movement fact, updates the derived
+   * balance, and applies FIFO valuation (ADR 0009): a receipt opens a cost layer; an issue
+   * consumes the oldest open layers and records exactly what it cost.
+   *
+   * A movement is never withheld to preserve a fact — if an issue outruns the available layers the
+   * movement still stands and `uncostedQuantity` reports the shortfall so the caller can raise a
+   * visible exception (the till blocks it up front; the server preserves the evidence).
+   */
+  async applyMovement(trx: Kysely<Database>, m: ApplyMovement): Promise<MovementResult> {
+    const movementId = crypto.randomUUID();
     await trx
       .insertInto('inventory_movements')
       .values({
-        id: crypto.randomUUID(),
+        id: movementId,
         tenant_id: m.tenantId,
         branch_id: m.branchId,
         location_id: m.locationId,
@@ -82,6 +124,7 @@ export class InventoryService {
         command_id: m.commandId ?? null,
         approved_by: m.approvedBy ?? null,
         approval_note: m.approvalNote ?? null,
+        cogs_minor: null,
       })
       .execute();
 
@@ -92,11 +135,94 @@ export class InventoryService {
       DO UPDATE SET quantity = stock_balances.quantity + EXCLUDED.quantity, updated_at = now()
       RETURNING quantity
     `.execute(trx);
-    return Number(row.rows[0]?.quantity ?? 0);
+    const quantity = Number(row.rows[0]?.quantity ?? 0);
+
+    let cogsMinor = 0;
+    let uncostedQuantity = 0;
+
+    if (m.quantityDelta > 0) {
+      // Inbound opens a layer at the stated cost (0 when genuinely unknown; the receipt path
+      // substitutes the last known purchase cost so stock is never silently valued at zero).
+      await trx
+        .insertInto('inventory_valuation_layers')
+        .values({
+          id: crypto.randomUUID(),
+          tenant_id: m.tenantId,
+          branch_id: m.branchId,
+          location_id: m.locationId,
+          product_id: m.productId,
+          source_movement_id: movementId,
+          unit_cost_minor: m.unitCostMinor ?? 0,
+          quantity_received: m.quantityDelta,
+          quantity_remaining: m.quantityDelta,
+        })
+        .execute();
+    } else if (m.quantityDelta < 0) {
+      let needed = -m.quantityDelta;
+      const layers = await trx
+        .selectFrom('inventory_valuation_layers')
+        .select(['id', 'unit_cost_minor', 'quantity_remaining'])
+        .where('tenant_id', '=', m.tenantId)
+        .where('branch_id', '=', m.branchId)
+        .where('location_id', '=', m.locationId)
+        .where('product_id', '=', m.productId)
+        .where('quantity_remaining', '>', 0)
+        .orderBy('received_at', 'asc')
+        .orderBy('id', 'asc')
+        .execute();
+
+      for (const layer of layers) {
+        if (needed <= 0) break;
+        const available = Number(layer.quantity_remaining);
+        const take = Math.min(available, needed);
+        if (take <= 0) continue;
+        const unitCost = Number(layer.unit_cost_minor);
+        const amount = roundHalfUp(take * unitCost);
+        await trx
+          .updateTable('inventory_valuation_layers')
+          .set({ quantity_remaining: available - take })
+          .where('id', '=', layer.id)
+          .execute();
+        await trx
+          .insertInto('inventory_cost_allocations')
+          .values({
+            id: crypto.randomUUID(),
+            tenant_id: m.tenantId,
+            movement_id: movementId,
+            layer_id: layer.id,
+            quantity: take,
+            unit_cost_minor: unitCost,
+            amount_minor: amount,
+          })
+          .execute();
+        cogsMinor += amount;
+        needed -= take;
+      }
+      uncostedQuantity = needed > 0 ? needed : 0;
+      if (cogsMinor !== 0) {
+        // Derived cost is filled in within the same transaction that recorded the fact; the
+        // quantity/reason/actor fields of a movement are never rewritten.
+        await trx.updateTable('inventory_movements').set({ cogs_minor: cogsMinor }).where('id', '=', movementId).execute();
+      }
+    }
+
+    return { quantity, cogsMinor, uncostedQuantity };
   }
 
-  /** Stock receipt (GRN): increase on-hand and roll the weighted-average cost forward. */
-  async receiveStock(trx: Kysely<Database>, ctx: InventoryContext, payload: StockReceiptPayload) {
+  /** Remaining value of open FIFO layers for one product at one location. */
+  async layerValue(trx: Kysely<Database>, tenantId: string, branchId: string, locationId: string, productId: string): Promise<number> {
+    const row = await sql<{ value_minor: string }>`
+      SELECT COALESCE(SUM(quantity_remaining * unit_cost_minor), 0) AS value_minor
+      FROM inventory_valuation_layers
+      WHERE tenant_id = ${tenantId} AND branch_id = ${branchId}
+        AND location_id = ${locationId} AND product_id = ${productId}
+        AND quantity_remaining > 0
+    `.execute(trx);
+    return Math.round(Number(row.rows[0]?.value_minor ?? 0));
+  }
+
+  /** Stock receipt (GRN): increase on-hand and open a FIFO valuation layer per line (ADR 0009). */
+  async receiveStock(trx: Kysely<Database>, ctx: InventoryContext, payload: StockReceiptPayload): Promise<ApplyResult> {
     const receipt = payload.receipt;
     const locationId = receipt.locationId ?? (await this.getOrCreateLocation(trx, ctx.tenantId, ctx.branchId));
     let totalValueMinor = 0;
@@ -109,6 +235,10 @@ export class InventoryService {
         .where('tenant_id', '=', ctx.tenantId)
         .executeTakeFirst();
       if (!product || product.deleted_at) continue;
+
+      // Without an explicit cost the last known purchase cost is used, so a receipt always opens a
+      // costed layer (ADR 0009) rather than silently valuing incoming stock at zero.
+      const unitCostMinor = line.unitCostMinor ?? Number(product.cost_minor);
 
       await this.applyMovement(trx, {
         tenantId: ctx.tenantId,
@@ -123,27 +253,15 @@ export class InventoryService {
         actorId: ctx.actorId,
         deviceId: ctx.deviceId,
         commandId: ctx.commandId,
+        unitCostMinor,
       });
 
       if (line.unitCostMinor !== undefined) {
-        // Weighted average across the branch's on-hand for this product (ADR 0006).
-        const totals = await trx
-          .selectFrom('stock_balances')
-          .select(({ fn }) => fn.sum<number>('quantity').as('qty'))
-          .where('tenant_id', '=', ctx.tenantId)
-          .where('branch_id', '=', ctx.branchId)
-          .where('product_id', '=', line.productId)
-          .executeTakeFirst();
-        const qtyAfter = Number(totals?.qty ?? line.quantity);
-        const qtyBefore = qtyAfter - line.quantity;
-        const oldCost = Number(product.cost_minor);
-        const newCost =
-          qtyAfter > 0
-            ? roundHalfUp((qtyBefore * oldCost + line.quantity * line.unitCostMinor) / qtyAfter)
-            : line.unitCostMinor;
-        await trx.updateTable('products').set({ cost_minor: newCost, updated_at: new Date() }).where('id', '=', line.productId).execute();
-        totalValueMinor += line.quantity * line.unitCostMinor;
+        // `products.cost_minor` is retained only as the latest known purchase cost (display and the
+        // fallback layer cost above); valuation itself is entirely layer-based.
+        await trx.updateTable('products').set({ cost_minor: line.unitCostMinor, updated_at: new Date() }).where('id', '=', line.productId).execute();
       }
+      totalValueMinor += roundHalfUp(line.quantity * unitCostMinor);
     }
 
     await this.events.audit(trx, {
@@ -170,11 +288,29 @@ export class InventoryService {
     return { status: 'accepted' as const, result: { receiptId: receipt.id, serverSeq: seq } };
   }
 
-  /** Stock adjustment: audited, reason-required, and never silently negative. */
-  async adjustStock(trx: Kysely<Database>, ctx: InventoryContext, payload: StockAdjustmentPayload) {
+  /** Stock adjustment: audited, reason-required, and never silently negative (ADR 0009). */
+  async adjustStock(trx: Kysely<Database>, ctx: InventoryContext, payload: StockAdjustmentPayload): Promise<ApplyResult> {
     const adjustment = payload.adjustment;
     const locationId = adjustment.locationId ?? (await this.getOrCreateLocation(trx, ctx.tenantId, ctx.branchId));
     let negative = false;
+    let uncosted = false;
+
+    // Validate every line before writing a single movement: a partially applied adjustment must
+    // never commit. A negative adjustment needs an explicit supervisor override note.
+    if (!adjustment.approvalNote) {
+      for (const line of adjustment.lines) {
+        if (line.quantityDelta >= 0) continue;
+        const available = await this.onHand(trx, ctx.tenantId, ctx.branchId, locationId, line.productId);
+        if (available + line.quantityDelta < 0) {
+          return {
+            status: 'rejected' as const,
+            code: 'OVERRIDE_REQUIRED',
+            message: `Adjustment would take ${line.productId} below zero; a supervisor override note is required`,
+            conflictCodes: ['NEGATIVE_STOCK'],
+          };
+        }
+      }
+    }
 
     for (const line of adjustment.lines) {
       const product = await trx
@@ -184,7 +320,7 @@ export class InventoryService {
         .where('tenant_id', '=', ctx.tenantId)
         .executeTakeFirst();
       if (!product) continue;
-      const resulting = await this.applyMovement(trx, {
+      const movement = await this.applyMovement(trx, {
         tenantId: ctx.tenantId,
         branchId: ctx.branchId,
         locationId,
@@ -197,9 +333,11 @@ export class InventoryService {
         actorId: ctx.actorId,
         deviceId: ctx.deviceId,
         commandId: ctx.commandId,
+        approvedBy: adjustment.approvedBy ?? null,
         approvalNote: adjustment.approvalNote ?? null,
       });
-      if (resulting < 0) negative = true;
+      if (movement.quantity < 0) negative = true;
+      if (movement.uncostedQuantity > 0) uncosted = true;
     }
 
     await this.events.audit(trx, {
@@ -220,14 +358,15 @@ export class InventoryService {
       eventType: 'stock.adjusted',
       aggregateType: 'StockAdjustment',
       aggregateId: adjustment.id,
-      payload: { reason: adjustment.reason, negative },
+      payload: { reason: adjustment.reason, negative, uncosted },
     });
     await this.events.outbox(trx, ctx.tenantId, 'stock.adjusted', { adjustmentId: adjustment.id });
 
+    const reviewRequired = negative || uncosted;
     return {
-      status: negative ? ('review_required' as const) : ('accepted' as const),
-      result: { adjustmentId: adjustment.id, serverSeq: seq, negative },
-      conflictCodes: negative ? ['NEGATIVE_STOCK'] : [],
+      status: reviewRequired ? ('review_required' as const) : ('accepted' as const),
+      result: { adjustmentId: adjustment.id, serverSeq: seq, negative, uncosted },
+      conflictCodes: reviewRequired ? ['NEGATIVE_STOCK'] : [],
     };
   }
 
@@ -249,6 +388,41 @@ export class InventoryService {
     return query.limit(Math.min(limit, 500)).execute();
   }
 
+  /**
+   * Stock value per product from the open FIFO layers (ADR 0009). Value is derived, never stored:
+   * it is exactly the sum of what remains in the layers minus what has already been consumed.
+   */
+  async valuation(tenantId: string, branchId?: string, limit = 200) {
+    const result = await sql<{
+      product_id: string;
+      sku: string;
+      name: string;
+      branch_id: string;
+      quantity_remaining: string;
+      value_minor: string;
+    }>`
+      SELECT l.product_id, p.sku, p.name, l.branch_id,
+             SUM(l.quantity_remaining) AS quantity_remaining,
+             SUM(l.quantity_remaining * l.unit_cost_minor) AS value_minor
+      FROM inventory_valuation_layers l
+      JOIN products p ON p.id = l.product_id
+      WHERE l.tenant_id = ${tenantId}
+        AND l.quantity_remaining > 0
+        ${branchId ? sql`AND l.branch_id = ${branchId}` : sql``}
+      GROUP BY l.product_id, p.sku, p.name, l.branch_id
+      ORDER BY p.name ASC
+      LIMIT ${Math.min(limit, 500)}
+    `.execute(this.dbs.db);
+    return result.rows.map((r) => ({
+      productId: r.product_id,
+      sku: r.sku,
+      name: r.name,
+      branchId: r.branch_id,
+      quantityRemaining: Number(r.quantity_remaining),
+      valueMinor: Math.round(Number(r.value_minor)),
+    }));
+  }
+
   async movements(tenantId: string, productId?: string, limit = 200) {
     let query = this.dbs.db
       .selectFrom('inventory_movements')
@@ -256,11 +430,13 @@ export class InventoryService {
       .select([
         'inventory_movements.id',
         'inventory_movements.product_id',
+        'inventory_movements.branch_id',
         'products.sku',
         'inventory_movements.quantity_delta',
         'inventory_movements.reason',
         'inventory_movements.source_type',
         'inventory_movements.source_id',
+        'inventory_movements.cogs_minor',
         'inventory_movements.occurred_at',
       ])
       .where('inventory_movements.tenant_id', '=', tenantId)

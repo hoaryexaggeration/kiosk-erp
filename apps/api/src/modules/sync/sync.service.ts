@@ -175,7 +175,7 @@ export class SyncService {
         return { status: 'rejected', code: 'VALIDATION_ERROR', message: parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ') };
       }
       const applied = await this.inventoryService.adjustStock(trx, commandCtx, parsed.data);
-      return { status: applied.status, result: applied.result, conflictCodes: applied.conflictCodes };
+      return { status: applied.status, result: applied.result, code: applied.code, message: applied.message, conflictCodes: applied.conflictCodes };
     }
 
     return { status: 'rejected', code: 'UNSUPPORTED_AGGREGATE', message: `Unsupported aggregateType: ${command.aggregateType}` };

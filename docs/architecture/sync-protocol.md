@@ -50,7 +50,7 @@ the push transaction; a missing permission yields `rejected` / `FORBIDDEN`.
 | `aggregateType` | Required permission | Payload (abridged) | Effect |
 |---|---|---|---|
 | `Sale` | `pos.sale.create` | `{ sale: { id, lines[], tenders[] } }` | Canonical sale + stock movements + AR + journal |
-| `StockReceipt` | `inventory.receive` | `{ receipt: { id, reason, lines[{ productId, quantity, unitCostMinor? }] } }` | Append stock in; roll weighted-average cost |
+| `StockReceipt` | `inventory.receive` | `{ receipt: { id, reason, lines[{ productId, quantity, unitCostMinor? }] } }` | Append stock in; open a FIFO valuation layer (ADR 0009) |
 | `StockAdjustment` | `inventory.adjust` | `{ adjustment: { id, reason, lines[{ productId, quantityDelta }] } }` | Append signed movement; `reason` mandatory |
 
 Unknown aggregates return `rejected` / `UNSUPPORTED_AGGREGATE`. Every `conflictCodes` entry returned by

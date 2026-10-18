@@ -26,8 +26,9 @@ movements are append-only facts.
 4. **Money:** all monetary amounts are **integer minor units** (`*_minor`, integer). Rounding is
    applied at the **tax-rule level** and totalled per document; the policy lives in
    `packages/domain-fixtures` and is implemented identically in TypeScript and Kotlin.
-5. **Cost method:** **weighted average** for the MVP (documented in ADR 0007 / posting matrix);
-   FIFO is deferred behind an explicit configuration flag.
+5. **Cost method:** ~~weighted average for the MVP~~ **SUPERSEDED by ADR 0009** — inventory is valued
+   **FIFO with valuation layers** (owner decision, §18.5). The money/precision rules above still stand
+   unchanged; only the cost-flow assumption changed.
 
 ## Consequences
 

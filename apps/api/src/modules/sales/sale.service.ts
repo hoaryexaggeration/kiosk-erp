@@ -121,6 +121,11 @@ export class SaleService {
       lineRows.map((l) => ({ unitPriceMinor: l.unitPriceMinor, quantity: l.quantity, discountBp: l.discountBp, taxRateBp: l.taxRateBp, taxInclusive: l.taxInclusive })),
     );
     const costTotalMinor = lineRows.reduce((s, l) => s + l.costMinor, 0);
+    // The authoritative cost of goods for stock-tracked lines is the FIFO value actually consumed
+    // (ADR 0009), computed below when movements are applied. The per-line snapshot is only kept
+    // for non-tracked lines (services, fees) where no valuation layer exists.
+    const nonTrackedCostMinor = lineRows.filter((l) => !l.stockTracked).reduce((s, l) => s + l.costMinor, 0);
+    let saleCogsMinor = 0;
 
     // --- price-snapshot review (dated promotions, §13 pricing snapshots) --------------
     // We keep the sale-time price the till actually charged and only flag divergence; we never
@@ -244,12 +249,15 @@ export class SaleService {
     }
 
     // --- stock movements (append-only) + projection ---------------------------------
+    // COGS is not read from `products.cost_minor`; it comes from the FIFO layers this sale
+    // actually consumes (ADR 0009).
     const trackingLines = lineRows.filter((l) => l.stockTracked && l.productId);
     if (trackingLines.length > 0) {
       const locationId = await this.inventory.getOrCreateLocation(trx, ctx.tenantId, ctx.branchId);
       const negatives: string[] = [];
+      const uncosted: string[] = [];
       for (const l of trackingLines) {
-        const resulting = await this.inventory.applyMovement(trx, {
+        const movement = await this.inventory.applyMovement(trx, {
           tenantId: ctx.tenantId,
           branchId: ctx.branchId,
           locationId,
@@ -263,14 +271,28 @@ export class SaleService {
           deviceId: ctx.deviceId,
           commandId: ctx.commandId,
         });
-        if (resulting < 0) negatives.push(l.productId as string);
+        saleCogsMinor += movement.cogsMinor;
+        if (movement.quantity < 0) negatives.push(l.productId as string);
+        if (movement.uncostedQuantity > 0) uncosted.push(l.productId as string);
       }
 
-      // Detect negative stock and raise a visible conflict (do not hide facts).
+      // Detect negative stock and raise a visible conflict (do not hide facts). An uncosted
+      // shortfall means part of the sale has no cost basis yet — the owner must resolve it.
       if (negatives.length > 0) {
         conflictCodes.push('NEGATIVE_STOCK');
         warnings.push(`Negative stock on ${negatives.length} product(s) after independent offline sales`);
       }
+      if (uncosted.length > 0) {
+        conflictCodes.push('UNCOSTED_STOCK');
+        warnings.push(`No cost basis for ${uncosted.length} product(s); COGS is understated until receipted`);
+      }
+    }
+
+    // The server is canonical: replace the client's provisional cost estimate with the FIFO value
+    // it actually consumed, so the sale row and the general ledger agree (ADR 0009).
+    const canonicalCostMinor = saleCogsMinor + nonTrackedCostMinor;
+    if (canonicalCostMinor !== costTotalMinor) {
+      await trx.updateTable('sales').set({ cost_total_minor: canonicalCostMinor }).where('id', '=', sale.id).execute();
     }
 
     // --- customer AR subledger (credit tender) --------------------------------------
@@ -290,7 +312,7 @@ export class SaleService {
     }
 
     // --- canonical journal (server-side posting, §7) --------------------------------
-    const glWarning = await this.postSaleJournal(trx, ctx, sale.id, totals, costTotalMinor, sale.tenders);
+    const glWarning = await this.postSaleJournal(trx, ctx, sale.id, totals, saleCogsMinor + nonTrackedCostMinor, sale.tenders);
     if (glWarning) warnings.push(glWarning);
 
     // --- platform records -----------------------------------------------------------

@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-/** Stock receipt (GRN). Increases on-hand and updates weighted-average cost. */
+/** Stock receipt (GRN). Increases on-hand and opens a FIFO valuation layer per line (ADR 0009). */
 export const StockReceiptSchema = z.object({
   receipt: z.object({
     id: z.string().uuid(),
@@ -23,12 +23,14 @@ export const StockReceiptSchema = z.object({
 });
 export type StockReceiptPayload = z.infer<typeof StockReceiptSchema>;
 
-/** Stock adjustment. A reason is mandatory; negative deltas may raise a visible conflict. */
+/** Stock adjustment. A reason is mandatory; a negative result needs a supervisor override (ADR 0009). */
 export const StockAdjustmentSchema = z.object({
   adjustment: z.object({
     id: z.string().uuid(),
     locationId: z.string().uuid().optional(),
     reason: z.string().min(1).max(120),
+    /** The supervisor who authorised a negative result; recorded on every movement. */
+    approvedBy: z.string().uuid().optional(),
     approvalNote: z.string().max(500).optional(),
     lines: z
       .array(

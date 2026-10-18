@@ -17,6 +17,7 @@ export const SEED = {
   licenseId: '55555555-5555-4555-8555-555555555555',
   taxCategoryId: '66666666-6666-4666-8666-666666666666',
   customerId: '77777777-7777-4777-8777-777777777777',
+  locationId: '99999999-9999-4999-8999-999999999991',
   productA: '88888888-8888-4888-8888-888888888881',
   productB: '88888888-8888-4888-8888-888888888882',
   ownerEmail: 'owner@kiosk.test',
@@ -113,9 +114,55 @@ export async function seedDev(dbs: DbService): Promise<void> {
 
     await trx
       .insertInto('stock_locations')
-      .values({ tenant_id: SEED.tenantId, branch_id: SEED.branchId, name: 'Store', kind: 'store' })
-      .onConflict((oc) => oc.doNothing())
+      .values({ id: SEED.locationId, tenant_id: SEED.tenantId, branch_id: SEED.branchId, name: 'Store', kind: 'store' })
+      .onConflict((oc) => oc.column('id').doNothing())
       .execute();
+
+    // Opening stock (ADR 0009, deferred item D3): seeded as movements plus FIFO valuation layers,
+    // never as a bare quantity in `stock_balances`, so the balance, the ledger and the valuation
+    // agree from the first sale. Opening cost is the product's cost_minor.
+    const opening = [
+      { productId: SEED.productA, quantity: 24, unitCostMinor: 4500, movementId: 'aaaa9999-9999-4999-8999-999999999991', layerId: 'bbbb9999-9999-4999-8999-999999999991' },
+      { productId: SEED.productB, quantity: 24, unitCostMinor: 4000, movementId: 'aaaa9999-9999-4999-8999-999999999992', layerId: 'bbbb9999-9999-4999-8999-999999999992' },
+    ] as const;
+    for (const o of opening) {
+      await trx
+        .insertInto('inventory_movements')
+        .values({
+          id: o.movementId,
+          tenant_id: SEED.tenantId,
+          branch_id: SEED.branchId,
+          location_id: SEED.locationId,
+          product_id: o.productId,
+          quantity_delta: o.quantity,
+          unit: 'ea',
+          reason: 'opening',
+          source_type: 'opening_stock',
+          source_id: null,
+        })
+        .onConflict((oc) => oc.column('id').doNothing())
+        .execute();
+      await trx
+        .insertInto('inventory_valuation_layers')
+        .values({
+          id: o.layerId,
+          tenant_id: SEED.tenantId,
+          branch_id: SEED.branchId,
+          location_id: SEED.locationId,
+          product_id: o.productId,
+          source_movement_id: o.movementId,
+          unit_cost_minor: o.unitCostMinor,
+          quantity_received: o.quantity,
+          quantity_remaining: o.quantity,
+        })
+        .onConflict((oc) => oc.column('id').doNothing())
+        .execute();
+      await sql`
+        INSERT INTO stock_balances (tenant_id, branch_id, location_id, product_id, quantity, updated_at)
+        VALUES (${SEED.tenantId}, ${SEED.branchId}, ${SEED.locationId}, ${o.productId}, ${o.quantity}, now())
+        ON CONFLICT (tenant_id, branch_id, location_id, product_id) DO NOTHING
+      `.execute(trx);
+    }
 
     await trx
       .insertInto('licenses')

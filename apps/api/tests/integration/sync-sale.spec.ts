@@ -90,7 +90,8 @@ describe('sync push/pull — offline cash sale (Phase 3/5)', () => {
     expect(Number(movements[0].quantity_delta)).toBe(-2);
 
     const balance = await dbs.db.selectFrom('stock_balances').selectAll().where('product_id', '=', SEED.productA).executeTakeFirstOrThrow();
-    expect(Number(balance.quantity)).toBe(-2);
+    // 24 units of opening stock (seed) less the 2 sold here (ADR 0009 valuation layers).
+    expect(Number(balance.quantity)).toBe(22);
 
     // Journal must balance.
     const journal = await dbs.db.selectFrom('journals').selectAll().where('source_id', '=', saleId).executeTakeFirstOrThrow();
@@ -98,8 +99,12 @@ describe('sync push/pull — offline cash sale (Phase 3/5)', () => {
     const debit = jl.reduce((s, l) => s + Number(l.debit_minor), 0);
     const credit = jl.reduce((s, l) => s + Number(l.credit_minor), 0);
     expect(debit).toBe(credit);
-    // Cash 13000 + COGS (2 x 4500) 9000 = 22000 debit; revenue 11207 + tax 1793 + inventory relief 9000 = 22000 credit.
+    // Cash 13000 + COGS (2 x 4500, from the oldest FIFO layer) 9000 = 22000 debit; revenue 11207 +
+    // tax 1793 + inventory relief 9000 = 22000 credit.
     expect(debit).toBe(22000);
+
+    // COGS must come from the FIFO layers, not from a weighted-average product cost.
+    expect(Number(movements[0].cogs_minor)).toBe(9000);
   });
 
   it('returns the same result for a duplicate command (idempotent)', async () => {
