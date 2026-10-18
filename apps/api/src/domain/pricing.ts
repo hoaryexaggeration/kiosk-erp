@@ -37,8 +37,7 @@ export function computeLine(input: LineInput): LineResult {
   return { grossMinor, discountMinor, netMinor: netBeforeTaxMinor, taxMinor, lineTotalMinor: netBeforeTaxMinor + taxMinor };
 }
 
-export function computeDocument(lines: LineInput[]) {
-  let subtotalMinor = 0;
+export function computeDocument(lines: LineInput[]) {  let subtotalMinor = 0;
   let taxTotalMinor = 0;
   let totalMinor = 0;
   let discountTotalMinor = 0;
@@ -50,4 +49,24 @@ export function computeDocument(lines: LineInput[]) {
     discountTotalMinor += r.discountMinor;
   }
   return { subtotalMinor, taxTotalMinor, totalMinor, discountTotalMinor };
+}
+
+/**
+ * Parse an operator-typed money amount into integer minor units, exactly. Mirror of
+ * `parseMinorInput` in packages/domain-fixtures (keep the two identical, as the fixture vectors do).
+ *
+ * Money never passes through binary floating point (§7): `parseFloat("1.15") * 100` is
+ * 114.99999999999999 and would silently lose a cent. Over-precise input is rejected rather than
+ * rounded, because quietly rounding a typed price is a money error.
+ *
+ * @returns minor units, or null when the input is not a valid amount
+ */
+export function parseMinorInput(text: string): number | null {
+  if (typeof text !== 'string') return null;
+  const trimmed = text.trim().replace(/,/g, '').replace(/\s/g, '');
+  if (!/^\d+(\.\d{1,2})?$/.test(trimmed)) return null;
+  const [whole, fraction = ''] = trimmed.split('.');
+  const cents = (fraction + '00').slice(0, 2);
+  const value = Number(whole) * 100 + Number(cents);
+  return Number.isSafeInteger(value) ? value : null;
 }

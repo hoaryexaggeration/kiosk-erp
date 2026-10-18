@@ -20,7 +20,7 @@ IPA/TestFlight build, not an APK.
 | 1 | Domain contracts, data model and sync specification | 🟡 fixtures, sync protocol, ADRs; OpenAPI/ERD/state machines outstanding |
 | 2 | Backend foundation and cloud controls | 🟡 API, auth, devices, licensing, outbox; CI/staging/backups outstanding |
 | 3 | Native shells, local database and sync center | 🟡 shell, Room, push/pull, Sync Center; `LicenseManager` export + app lock outstanding |
-| 4 | Catalogue, pricing and inventory ledger | 🟡 **close-out in progress** — FIFO valuation done (ADR 0009); UI, import, UoM, transfers, stocktake next |
+| 4 | Catalogue, pricing and inventory ledger | 🟡 **close-out in progress** — FIFO valuation (ADR 0009), barcode editing and the catalogue management UI are done; bulk import, UoM, transfers, stocktake next |
 | 5 | Offline POS vertical slice | 🟡 scanning done; session, oversell block, discounts, hold/void, receipts, history to do |
 | 6 | Cash management, shifts, refunds and end-of-day | ⏳ refunds live here, not in Phase 5 |
 | 7 | Customers, suppliers, debtors and creditors | ⏳ |

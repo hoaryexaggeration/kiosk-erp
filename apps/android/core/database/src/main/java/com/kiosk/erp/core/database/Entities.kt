@@ -18,6 +18,10 @@ data class ProductEntity(
     val isStockTracked: Boolean,
     val version: Int,
     val updatedAtEpochMs: Long,
+    val description: String? = null,
+    val categoryId: String? = null,
+    val taxCategoryId: String? = null,
+    val isActive: Boolean = true,
 )
 
 @Entity(tableName = "barcodes", indices = [Index(value = ["barcode"], unique = true)])

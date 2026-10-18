@@ -7,7 +7,7 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { computeLine, computeDocument, evaluateCredit, canTransition } from '../src/index.mjs';
+import { computeLine, computeDocument, evaluateCredit, canTransition, parseMinorInput } from '../src/index.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const fixtures = join(here, '..', 'fixtures');
@@ -34,6 +34,12 @@ for (const c of pricing.lines) {
 }
 for (const d of pricing.documents) {
   check(`pricing-doc:${d.id}`, computeDocument(d.lines), d.expected);
+}
+
+// --- money input parsing -------------------------------------------------
+// A typed price must become integer minor units without ever touching binary floating point.
+for (const c of pricing.parsing ?? []) {
+  check(`parsing:${c.id}`, parseMinorInput(c.input), c.expected);
 }
 
 // --- credit exposure -----------------------------------------------------

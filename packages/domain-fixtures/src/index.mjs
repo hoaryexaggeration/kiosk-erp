@@ -37,8 +37,7 @@ export function computeLine(input) {
 }
 
 /** Sum a document from its lines. */
-export function computeDocument(lines) {
-  let subtotalMinor = 0;
+export function computeDocument(lines) {  let subtotalMinor = 0;
   let taxTotalMinor = 0;
   let totalMinor = 0;
   for (const line of lines) {
@@ -66,4 +65,25 @@ export function evaluateCredit(input) {
 export function canTransition(transitions, from, to) {
   const allowed = transitions[from];
   return Array.isArray(allowed) && allowed.includes(to);
+}
+
+/**
+ * Parse an operator-typed money amount into integer minor units, exactly.
+ *
+ * Money is never allowed to pass through binary floating point (§7), so this is string/integer
+ * arithmetic only — `parseFloat("1.15") * 100` is 114.99999999999999 and would lose a cent.
+ * Over-precise input (more than two decimals) is REJECTED rather than silently rounded: rounding
+ * someone's typed price without telling them is exactly the kind of quiet money error §7 forbids.
+ *
+ * @param {string} text e.g. "65", "65.5", "1,234.56" (thousands separators are stripped)
+ * @returns {number|null} minor units, or null when the input is not a valid amount
+ */
+export function parseMinorInput(text) {
+  if (typeof text !== 'string') return null;
+  const trimmed = text.trim().replace(/,/g, '').replace(/\s/g, '');
+  if (!/^\d+(\.\d{1,2})?$/.test(trimmed)) return null;
+  const [whole, fraction = ''] = trimmed.split('.');
+  const cents = (fraction + '00').slice(0, 2);
+  const value = Number(whole) * 100 + Number(cents);
+  return Number.isSafeInteger(value) ? value : null;
 }

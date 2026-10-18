@@ -14,10 +14,22 @@ import kotlinx.serialization.json.jsonPrimitive
 /**
  * The device's offline catalogue cache. Reads are always served from Room; the network only ever
  * fills the cache (§1.6 rule 1). Tax rates come from the server's tax categories — never a default.
+ *
+ * Barcodes are cached as a SET. When the server reports a product's barcodes, whatever it reports
+ * replaces what is stored for that product, so a barcode removed on the server stops resolving on the
+ * device. Only ever adding would leave a deleted tag scannable for ever.
  */
 class ProductRepository(private val db: KioskDatabase) {
 
     fun observeProducts(): Flow<List<ProductEntity>> = db.productDao().observeAll()
+
+    /** Catalogue search for the management screen (name, SKU or barcode). */
+    fun observeMatching(query: String): Flow<List<ProductEntity>> = db.productDao().observeMatching(query.trim())
+
+    suspend fun byId(id: String): ProductEntity? = db.productDao().byId(id)
+
+    /** The barcodes currently cached for a product (used to seed the editor). */
+    suspend fun barcodes(productId: String): List<String> = db.productDao().barcodesFor(productId)
 
     /** Resolve a scanned/manual barcode from the LOCAL cache only — scanning never needs a network. */
     suspend fun findByBarcode(code: String): ProductEntity? = db.productDao().byBarcode(code.trim())
@@ -25,22 +37,31 @@ class ProductRepository(private val db: KioskDatabase) {
     suspend fun refreshProducts(products: List<ServerProduct>) {
         db.withTransaction {
             db.productDao().upsertAll(products.map { it.toEntity() })
-            val barcodes = products.flatMap { p -> p.barcodes.map { BarcodeEntity(barcode = it, productId = p.id) } }
-            if (barcodes.isNotEmpty()) db.productDao().upsertBarcodes(barcodes)
+            for (p in products) replaceBarcodes(p.id, p.barcodes)
+        }
+    }
+
+    /** Cache a single product returned by a create/update so the change is visible immediately. */
+    suspend fun cacheProduct(product: ServerProduct) {
+        db.withTransaction {
+            db.productDao().upsertAll(listOf(product.toEntity()))
+            replaceBarcodes(product.id, product.barcodes)
         }
     }
 
     /** Apply a `product.created` / `product.updated` server event to the local cache (delta sync). */
     suspend fun applyProductEvent(obj: JsonObject) {
         val id = obj["id"]?.jsonPrimitive?.content ?: return
+        val sku = obj["sku"]?.jsonPrimitive?.content ?: return
+        val name = obj["name"]?.jsonPrimitive?.content ?: return
         val barcodes = obj["barcodes"]?.jsonArray?.mapNotNull { it.jsonPrimitive.contentOrNull } ?: emptyList()
         db.withTransaction {
             db.productDao().upsertAll(
                 listOf(
                     ProductEntity(
                         id = id,
-                        sku = obj["sku"]?.jsonPrimitive?.content ?: return@withTransaction,
-                        name = obj["name"]?.jsonPrimitive?.content ?: return@withTransaction,
+                        sku = sku,
+                        name = name,
                         unit = obj["unit"]?.jsonPrimitive?.content ?: "ea",
                         priceMinor = obj["price_minor"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0L,
                         costMinor = obj["cost_minor"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0L,
@@ -49,12 +70,22 @@ class ProductRepository(private val db: KioskDatabase) {
                         isStockTracked = obj["is_stock_tracked"]?.jsonPrimitive?.content?.toBooleanStrictOrNull() ?: true,
                         version = obj["version"]?.jsonPrimitive?.content?.toIntOrNull() ?: 1,
                         updatedAtEpochMs = System.currentTimeMillis(),
+                        description = obj["description"]?.jsonPrimitive?.contentOrNull,
+                        categoryId = obj["category_id"]?.jsonPrimitive?.contentOrNull,
+                        taxCategoryId = obj["tax_category_id"]?.jsonPrimitive?.contentOrNull,
+                        isActive = obj["is_active"]?.jsonPrimitive?.content?.toBooleanStrictOrNull() ?: true,
                     ),
                 ),
             )
-            if (barcodes.isNotEmpty()) {
-                db.productDao().upsertBarcodes(barcodes.map { BarcodeEntity(barcode = it, productId = id) })
-            }
+            replaceBarcodes(id, barcodes)
+        }
+    }
+
+    /** Delete-then-insert so the stored set is exactly what the server reports. */
+    private suspend fun replaceBarcodes(productId: String, barcodes: List<String>) {
+        db.productDao().deleteBarcodesFor(productId)
+        if (barcodes.isNotEmpty()) {
+            db.productDao().upsertBarcodes(barcodes.map { BarcodeEntity(barcode = it, productId = productId) })
         }
     }
 
@@ -67,8 +98,12 @@ class ProductRepository(private val db: KioskDatabase) {
         costMinor = costMinor,
         taxRateBp = taxRateBp,
         taxInclusive = taxInclusive,
-        isStockTracked = true,
+        isStockTracked = isStockTracked,
         version = version,
         updatedAtEpochMs = System.currentTimeMillis(),
+        description = description,
+        categoryId = categoryId,
+        taxCategoryId = taxCategoryId,
+        isActive = isActive,
     )
 }

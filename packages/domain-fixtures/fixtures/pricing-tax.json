@@ -39,5 +39,22 @@
       ],
       "expected": { "subtotalMinor": 30000, "taxTotalMinor": 4800, "totalMinor": 34800 }
     }
+  ],
+  "parsing": [
+    { "$comment": "Operator-typed amounts. Integer-only: a typed price must never pass through binary floating point. Over-precise input is rejected, never quietly rounded.", "id": "whole", "input": "65", "expected": 6500 },
+    { "id": "one-decimal", "input": "65.5", "expected": 6550 },
+    { "id": "two-decimals", "input": "65.00", "expected": 6500 },
+    { "id": "leading-zeros", "input": "0100", "expected": 10000 },
+    { "id": "cents-only", "input": "0.01", "expected": 1 },
+    { "id": "thousands-separator", "input": "1,234.56", "expected": 123456 },
+    { "id": "surrounding-space", "input": "  65.00  ", "expected": 6500 },
+    { "id": "float-trap", "input": "1.15", "expected": 115 },
+    { "id": "too-precise", "input": "65.001", "expected": null },
+    { "id": "trailing-dot", "input": "65.", "expected": null },
+    { "id": "leading-dot", "input": ".65", "expected": null },
+    { "id": "letters", "input": "6a5", "expected": null },
+    { "id": "empty", "input": "", "expected": null },
+    { "id": "negative", "input": "-65", "expected": null },
+    { "id": "two-dots", "input": "6.5.0", "expected": null }
   ]
 }

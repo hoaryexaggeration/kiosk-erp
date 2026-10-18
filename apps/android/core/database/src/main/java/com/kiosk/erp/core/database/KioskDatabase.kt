@@ -22,7 +22,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         SyncStateEntity::class,
         StockBalanceEntity::class,
     ],
-    version = 2,
+    version = 3,
     exportSchema = false,
 )
 abstract class KioskDatabase : RoomDatabase() {
@@ -55,8 +55,22 @@ abstract class KioskDatabase : RoomDatabase() {
 
         fun build(context: Context): KioskDatabase =
             Room.databaseBuilder(context, KioskDatabase::class.java, "kiosk-erp.db")
-                .addMigrations(MIGRATION_1_2)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
                 .fallbackToDestructiveMigrationOnDowngrade()
                 .build()
+
+        /**
+         * v2 → v3 carries the catalogue fields the management screen edits (description, category and
+         * active flag) so the device can show and edit a complete product without a server round-trip
+         * for reads. Additive columns only — existing rows keep their values and default to active.
+         */
+        val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `products` ADD COLUMN `description` TEXT")
+                db.execSQL("ALTER TABLE `products` ADD COLUMN `categoryId` TEXT")
+                db.execSQL("ALTER TABLE `products` ADD COLUMN `taxCategoryId` TEXT")
+                db.execSQL("ALTER TABLE `products` ADD COLUMN `isActive` INTEGER NOT NULL DEFAULT 1")
+            }
+        }
     }
 }

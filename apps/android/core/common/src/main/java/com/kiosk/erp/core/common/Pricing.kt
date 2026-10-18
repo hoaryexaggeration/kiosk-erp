@@ -74,4 +74,30 @@ object Pricing {
         val abs = kotlin.math.abs(minor)
         return "$sign${abs / 100}.${(abs % 100).toString().padStart(2, '0')}"
     }
+
+    /**
+     * Parse an operator-typed money amount into integer minor units, exactly. Mirror of
+     * `parseMinorInput` in packages/domain-fixtures and apps/api/src/domain/pricing.ts — keep all
+     * three identical, as the fixture vectors require.
+     *
+     * Integer/string arithmetic only: money never passes through binary floating point (§7).
+     * Over-precise input (more than two decimals) is REJECTED rather than rounded, because silently
+     * rounding a typed price is a money error.
+     *
+     * @return minor units, or null when the input is not a valid amount
+     */
+    fun parseMinorInput(text: String?): Long? {
+        if (text == null) return null
+        val trimmed = text.trim().replace(",", "").replace(" ", "")
+        if (!Regex("^\\d+(\\.\\d{1,2})?$").matches(trimmed)) return null
+        val parts = trimmed.split(".")
+        val whole = parts[0]
+        val fraction = if (parts.size > 1) parts[1] else ""
+        val cents = (fraction + "00").substring(0, 2)
+        return try {
+            whole.toLong() * 100 + cents.toLong()
+        } catch (_: NumberFormatException) {
+            null
+        }
+    }
 }

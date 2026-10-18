@@ -6,6 +6,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
@@ -49,6 +50,36 @@ data class ServerProduct(
     val taxRateBp: Int,
     val taxInclusive: Boolean,
     val barcodes: List<String> = emptyList(),
+    val description: String? = null,
+    val categoryId: String? = null,
+    val taxCategoryId: String? = null,
+    val isStockTracked: Boolean = true,
+    val isActive: Boolean = true,
+)
+
+data class ServerCategory(val id: String, val name: String, val parentId: String? = null)
+
+data class ServerTaxCategory(val id: String, val name: String, val rateBp: Int, val inclusive: Boolean)
+
+/**
+ * Everything the catalogue editor can set. `barcodes` is the FULL desired set — the server replaces
+ * what it holds (item 4.1), so removing a tag here removes it everywhere after sync.
+ * `expectedVersion` carries the optimistic-concurrency check so a stale edit cannot silently win.
+ */
+data class ProductDraft(
+    val id: String?,
+    val sku: String,
+    val name: String,
+    val description: String? = null,
+    val categoryId: String? = null,
+    val taxCategoryId: String? = null,
+    val unit: String = "ea",
+    val priceMinor: Long = 0,
+    val costMinor: Long = 0,
+    val isStockTracked: Boolean = true,
+    val isActive: Boolean = true,
+    val barcodes: List<String> = emptyList(),
+    val expectedVersion: Int? = null,
 )
 
 data class ServerBalance(
@@ -87,8 +118,19 @@ class ApiClient {
         }
     }
 
-    private fun get(baseUrl: String, path: String, token: String?): JsonElement {
-        val builder = Request.Builder().url(url(baseUrl, path)).get()
+    private fun patch(baseUrl: String, path: String, token: String?, body: JsonElement): JsonElement {
+        val builder = Request.Builder().url(url(baseUrl, path)).patch(body.toString().toRequestBody(jsonMedia))
+        if (token != null) builder.header("authorization", "Bearer $token")
+        client.newCall(builder.build()).execute().use { response ->
+            val text = response.body?.string() ?: ""
+            if (!response.isSuccessful) {
+                throw parseError(response.code, text)
+            }
+            return if (text.isBlank()) JsonObject(emptyMap()) else json.parseToJsonElement(text)
+        }
+    }
+
+    private fun get(baseUrl: String, path: String, token: String?): JsonElement {        val builder = Request.Builder().url(url(baseUrl, path)).get()
         if (token != null) builder.header("authorization", "Bearer $token")
         client.newCall(builder.build()).execute().use { response ->
             val text = response.body?.string() ?: ""
@@ -156,22 +198,118 @@ class ApiClient {
 
     suspend fun serverProducts(baseUrl: String, token: String): List<ServerProduct> = withContext(Dispatchers.IO) {
         val response = get(baseUrl, "products?limit=500", token).jsonObject
-        response["products"]?.jsonArray?.map { element ->
+        response["products"]?.jsonArray?.map { it.jsonObject.toServerProduct() } ?: emptyList()
+    }
+
+    /**
+     * Create or update a catalogue product.
+     *
+     * Editing the catalogue is a server-authoritative management action, not a cashier-loop write, so
+     * it talks to the server directly and does NOT go through the offline outbox: a product with two
+     * conflicting offline versions has no meaningful field-level merge, and inventing one would risk
+     * the exact "last write wins on money" failure §7 forbids. The UI states plainly that it needs a
+     * connection. Reads stay offline from Room.
+     */
+    suspend fun saveProduct(baseUrl: String, token: String, draft: ProductDraft): ServerProduct = withContext(Dispatchers.IO) {
+        val creating = draft.id == null
+        val path = if (creating) "products" else "products/${draft.id}"
+        val body = productBody(draft, forCreate = creating)
+        val response = if (creating) post(baseUrl, path, token, body) else patch(baseUrl, path, token, body)
+        response.jsonObject.toServerProduct()
+    }
+
+    suspend fun categories(baseUrl: String, token: String): List<ServerCategory> = withContext(Dispatchers.IO) {
+        val response = get(baseUrl, "categories", token).jsonObject
+        response["categories"]?.jsonArray?.map { element ->
             val obj = element.jsonObject
-            ServerProduct(
+            ServerCategory(
                 id = obj["id"]?.jsonPrimitive?.content ?: "",
-                sku = obj["sku"]?.jsonPrimitive?.content ?: "",
                 name = obj["name"]?.jsonPrimitive?.content ?: "",
-                unit = obj["unit"]?.jsonPrimitive?.content ?: "ea",
-                priceMinor = obj["price_minor"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0L,
-                costMinor = obj["cost_minor"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0L,
-                version = obj["version"]?.jsonPrimitive?.content?.toIntOrNull() ?: 1,
-                taxRateBp = obj["tax_rate_bp"]?.jsonPrimitive?.content?.toIntOrNull() ?: 0,
-                taxInclusive = obj["tax_inclusive"]?.jsonPrimitive?.content?.toBooleanStrictOrNull() ?: false,
-                barcodes = obj["barcodes"]?.jsonArray?.mapNotNull { it.jsonPrimitive.contentOrNull } ?: emptyList(),
+                parentId = obj["parent_id"]?.jsonPrimitive?.contentOrNull,
             )
         } ?: emptyList()
     }
+
+    suspend fun createCategory(baseUrl: String, token: String, name: String): ServerCategory = withContext(Dispatchers.IO) {
+        val body = buildJsonObject { put("name", name) }
+        val obj = post(baseUrl, "categories", token, body).jsonObject
+        ServerCategory(
+            id = obj["id"]?.jsonPrimitive?.content ?: "",
+            name = obj["name"]?.jsonPrimitive?.content ?: name,
+            parentId = obj["parent_id"]?.jsonPrimitive?.contentOrNull,
+        )
+    }
+
+    suspend fun taxCategories(baseUrl: String, token: String): List<ServerTaxCategory> = withContext(Dispatchers.IO) {
+        val response = get(baseUrl, "tax-categories", token).jsonObject
+        response["taxCategories"]?.jsonArray?.map { element ->
+            val obj = element.jsonObject
+            ServerTaxCategory(
+                id = obj["id"]?.jsonPrimitive?.content ?: "",
+                name = obj["name"]?.jsonPrimitive?.content ?: "",
+                rateBp = obj["rate_bp"]?.jsonPrimitive?.content?.toIntOrNull() ?: 0,
+                inclusive = obj["inclusive"]?.jsonPrimitive?.content?.toBooleanStrictOrNull() ?: false,
+            )
+        } ?: emptyList()
+    }
+
+    suspend fun createTaxCategory(baseUrl: String, token: String, name: String, rateBp: Int, inclusive: Boolean): ServerTaxCategory = withContext(Dispatchers.IO) {
+        val body = buildJsonObject {
+            put("name", name)
+            put("rateBp", rateBp)
+            put("inclusive", inclusive)
+        }
+        val obj = post(baseUrl, "tax-categories", token, body).jsonObject
+        ServerTaxCategory(
+            id = obj["id"]?.jsonPrimitive?.content ?: "",
+            name = obj["name"]?.jsonPrimitive?.content ?: name,
+            rateBp = obj["rate_bp"]?.jsonPrimitive?.content?.toIntOrNull() ?: rateBp,
+            inclusive = obj["inclusive"]?.jsonPrimitive?.content?.toBooleanStrictOrNull() ?: inclusive,
+        )
+    }
+
+    /**
+     * `POST /products` rejects an explicit null for description/category/tax (only `undefined` is
+     * accepted), so a create omits absent optionals while an update sends null to clear them.
+     */
+    private fun productBody(draft: ProductDraft, forCreate: Boolean): JsonObject = buildJsonObject {
+        put("sku", draft.sku)
+        put("name", draft.name)
+        put("unit", draft.unit)
+        put("priceMinor", draft.priceMinor)
+        put("costMinor", draft.costMinor)
+        put("isStockTracked", draft.isStockTracked)
+        put("barcodes", JsonArray(draft.barcodes.map { JsonPrimitive(it) }))
+        if (forCreate) {
+            draft.description?.let { put("description", it) }
+            draft.categoryId?.let { put("categoryId", it) }
+            draft.taxCategoryId?.let { put("taxCategoryId", it) }
+        } else {
+            put("description", draft.description)
+            put("categoryId", draft.categoryId)
+            put("taxCategoryId", draft.taxCategoryId)
+            put("isActive", draft.isActive)
+            draft.expectedVersion?.let { put("expectedVersion", it) }
+        }
+    }
+
+    private fun JsonObject.toServerProduct(): ServerProduct = ServerProduct(
+        id = this["id"]?.jsonPrimitive?.content ?: "",
+        sku = this["sku"]?.jsonPrimitive?.content ?: "",
+        name = this["name"]?.jsonPrimitive?.content ?: "",
+        unit = this["unit"]?.jsonPrimitive?.content ?: "ea",
+        priceMinor = this["price_minor"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0L,
+        costMinor = this["cost_minor"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0L,
+        version = this["version"]?.jsonPrimitive?.content?.toIntOrNull() ?: 1,
+        taxRateBp = this["tax_rate_bp"]?.jsonPrimitive?.content?.toIntOrNull() ?: 0,
+        taxInclusive = this["tax_inclusive"]?.jsonPrimitive?.content?.toBooleanStrictOrNull() ?: false,
+        barcodes = this["barcodes"]?.jsonArray?.mapNotNull { it.jsonPrimitive.contentOrNull } ?: emptyList(),
+        description = this["description"]?.jsonPrimitive?.contentOrNull,
+        categoryId = this["category_id"]?.jsonPrimitive?.contentOrNull,
+        taxCategoryId = this["tax_category_id"]?.jsonPrimitive?.contentOrNull,
+        isStockTracked = this["is_stock_tracked"]?.jsonPrimitive?.content?.toBooleanStrictOrNull() ?: true,
+        isActive = this["is_active"]?.jsonPrimitive?.content?.toBooleanStrictOrNull() ?: true,
+    )
 
     suspend fun inventoryBalances(baseUrl: String, token: String): List<ServerBalance> = withContext(Dispatchers.IO) {
         val response = get(baseUrl, "inventory/balances?limit=500", token).jsonObject

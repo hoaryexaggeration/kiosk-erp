@@ -109,6 +109,35 @@ describe('catalogue + price resolution (Phase 4)', () => {
     expect(cleared.body.barcodes).toEqual([]);
   });
 
+  it('carries the tax category through create and update so an edit cannot silently clear it', async () => {
+    // The device caches `tax_category_id` and sends it back on save. If the payload omitted it, an
+    // edit would send null and quietly drop the product's 16% VAT rate.
+    const created = await auth(request(app.getHttpServer()).post('/v1/products')).send({
+      sku: 'PH4-TAX-1',
+      name: 'Tax category round trip',
+      taxCategoryId: SEED.taxCategoryId,
+      priceMinor: 11600,
+    });
+    expect(created.status).toBe(201);
+    expect(created.body.tax_category_id).toBe(SEED.taxCategoryId);
+    expect(created.body.tax_rate_bp).toBe(1600);
+    const id = created.body.id as string;
+
+    const renamed = await auth(request(app.getHttpServer()).patch(`/v1/products/${id}`)).send({
+      name: 'Renamed but still taxed',
+      taxCategoryId: SEED.taxCategoryId,
+      expectedVersion: 1,
+    });
+    expect(renamed.status).toBe(200);
+    expect(renamed.body.tax_category_id).toBe(SEED.taxCategoryId);
+    expect(renamed.body.tax_rate_bp).toBe(1600);
+
+    // Clearing is still possible when it is asked for explicitly.
+    const cleared = await auth(request(app.getHttpServer()).patch(`/v1/products/${id}`)).send({ taxCategoryId: null, expectedVersion: 2 });
+    expect(cleared.body.tax_category_id).toBeNull();
+    expect(cleared.body.tax_rate_bp).toBe(0);
+  });
+
   it('pushes a product delta to devices as a server event', async () => {
     const events = await dbs.db
       .selectFrom('server_events')

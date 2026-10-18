@@ -110,7 +110,7 @@ must be completed when its target phase is reached.
 
 | # | Item skipped | Appears in | Target phase | Done |
 |---|---|---|---|---|
-| D1 | Product/category/tax **management UI** (server CRUD exists) | §3.C, §15 Ph4 | 4 | ☐ |
+| D1 | Product/category/tax **management UI** (server CRUD exists) | §3.C, §15 Ph4 | 4 ✔ | ✔ |
 | D2 | Bulk product import with preview/validation/error report (`POST /v1/products/import`) | §9, §15 Ph4 | 4 | ☐ |
 | D3 | Opening-stock import workflow (seeded opening stock with FIFO layers exists) | §15 Ph4 | 4 | ◐ |
 | D4 | Units of measure + conversions, variants, brands, supplier product codes | §3.C | 4 | ☐ |
@@ -156,8 +156,8 @@ each later phase is expanded to the same granularity as it becomes current.
 |---|---|---|
 | 4.0 ✔ | **FIFO valuation layers** (ADR 0009, replaces weighted average) | Done: layers + cost allocations + `cogs_minor`, `GET /v1/inventory/valuation`, override rule for negative adjustments, seeded opening stock. 29/29 API tests pass |
 | 4.1 ✔ | `PATCH /v1/products/:id` accepts `barcodes`; device replaces that product's barcodes transactionally (D9) | Done: set semantics, `DUPLICATE_BARCODE` conflict, barcode resolves immediately after the change |
-| 4.2 | Product management UI: list/search, create, edit, deactivate; barcodes, category, tax category, unit, cost, price | A product created on the phone reaches the server and back without hand-editing SQL |
-| 4.3 | Category + tax-category management UI | Same |
+| 4.2 ✔ | Product management UI: list/search, create, edit, deactivate; barcodes, category, tax category, unit, cost, price | Done: `feature:catalog` list + editor + barcode set editing; Room v3 adds description/category/taxCategory/active |
+| 4.3 ✔ | Category + tax-category management UI | Done: "Categories & tax" screen in `feature:catalog`; rate entered as a percentage, stored exactly in basis points |
 | 4.4 | Bulk import: CSV/JSON upload → **preview → validation → per-row error report → commit** (D2) | A malformed file creates **no partial records** and reports every bad row |
 | 4.5 | Opening stock import (D3) | Opening balances arrive as stock movements, never as a direct quantity edit |
 | 4.6 | Units of measure + conversions (D4) | Buying in crates and selling in pieces keeps one stock ledger |

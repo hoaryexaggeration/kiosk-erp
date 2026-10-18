@@ -26,6 +26,25 @@ interface ProductDao {
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertBarcodes(barcodes: List<BarcodeEntity>)
+
+    /** Barcodes are a SET, not an append-only log: a tag removed on the server must stop resolving. */
+    @Query("DELETE FROM barcodes WHERE productId = :productId")
+    suspend fun deleteBarcodesFor(productId: String)
+
+    @Query("SELECT barcode FROM barcodes WHERE productId = :productId ORDER BY barcode ASC")
+    suspend fun barcodesFor(productId: String): List<String>
+
+    /**
+     * Catalogue search for the management screen. Matches name, SKU or barcode so a shopkeeper can
+     * find an item by whichever identifier they have. Capped so a 20 000-SKU catalogue stays snappy.
+     */
+    @Query(
+        "SELECT p.* FROM products p WHERE :query = '' OR p.name LIKE '%' || :query || '%' " +
+            "OR p.sku LIKE '%' || :query || '%' " +
+            "OR EXISTS (SELECT 1 FROM barcodes b WHERE b.productId = p.id AND b.barcode LIKE '%' || :query || '%') " +
+            "ORDER BY p.isActive DESC, p.name ASC LIMIT 500",
+    )
+    fun observeMatching(query: String): Flow<List<ProductEntity>>
 }
 
 @Dao
