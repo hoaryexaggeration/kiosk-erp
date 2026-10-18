@@ -5,6 +5,12 @@ plugins {
     alias(libs.plugins.kotlin.android)
 }
 
+// The version is supplied by the build gate (`build-apk.sh` passes -PappVersionCode/-PappVersionName)
+// so the artifact filename, the manifest version and the version reported to the server can never
+// drift apart. The literals below are only the fallback for IDE/AS builds.
+val appVersionCode: Int = (project.findProperty("appVersionCode") as String?)?.toIntOrNull() ?: 500
+val appVersionName: String = (project.findProperty("appVersionName") as String?) ?: "0.5.0"
+
 // Stable internal-test signing key (ADR 0005). Generated once by `build-apk.sh` and kept out of git;
 // a real release signing key is a separate, later concern.
 val keystorePropertiesFile = rootProject.file("keystore/keystore.properties")
@@ -22,8 +28,8 @@ android {
         applicationId = "com.kiosk.erp"
         minSdk = 26
         targetSdk = 34
-        versionCode = 5
-        versionName = "0.4.1"
+        versionCode = appVersionCode
+        versionName = appVersionName
         // Local dev backend; override per environment.
         buildConfigField("String", "DEFAULT_API_BASE_URL", "\"http://10.0.2.2:3000/v1\"")
     }

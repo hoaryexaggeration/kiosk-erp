@@ -34,9 +34,9 @@ Each phase ends with the **mandatory APK delivery gate**: an installable, intern
 
 | # | Deliverable | Exit criteria | State |
 |---|---|---|---|
-| 5.1 | Camera barcode scanning on the POS screen | Scan resolves a product and adds it to the cart offline | ⏳ |
-| 5.2 | Receipt printing via an adapter interface | A cash sale prints a receipt (or records a durable print failure) | ⏳ |
-| 5.3 | Additional offline operations beyond `Sale` (returns, no-sale) | Each new aggregate posts canonically and idempotently server-side | ⏳ |
+| 5.1 | Camera barcode scanning on the POS screen | Scan resolves a product and adds it to the cart offline | ✅ |
+| 5.2 | Receipt printing via a Bluetooth ESC/POS adapter | A cash sale prints a receipt on a paired thermal printer (or records a durable print failure) | ⏳ |
+| 5.3 | Additional offline operations: returns/refunds (manager-approved) and no-sale | Each new aggregate posts canonically and idempotently server-side | ⏳ |
 
 ### Phase 6 — Cash sessions and sync hardening _(inferred)_
 

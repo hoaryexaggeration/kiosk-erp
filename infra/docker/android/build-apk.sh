@@ -12,6 +12,9 @@ ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 IMAGE="kiosk-erp-android-builder"
 PHASE="${PHASE:-03}"
 VERSION="${VERSION:-0.3.0}"
+# versionCode is derived from the semantic version (0.5.0 -> 500, 0.4.1 -> 401) so it is always
+# monotonic and can never disagree with the artifact name or the manifest.
+VERSION_CODE="${VERSION_CODE:-$(echo "${VERSION}" | awk -F. '{printf "%d", ($1*10000)+($2*100)+$3}')}"
 ARTIFACTS="${ROOT}/artifacts"
 
 mkdir -p "${ARTIFACTS}"
@@ -44,13 +47,16 @@ EOF
   echo "    key: ${KEYSTORE_FILE}"
 fi
 
-echo "==> Compiling debug APK (phase ${PHASE}, v${VERSION})"
+echo "==> Compiling debug APK (phase ${PHASE}, v${VERSION}, versionCode ${VERSION_CODE})"
 docker run --rm \
   -v "${ROOT}/apps/android":/workspace \
   -v "${ARTIFACTS}":/artifacts \
   -v kiosk-erp-gradle-cache:/opt/gradle-home \
   -w /workspace \
-  "${IMAGE}" gradle --no-daemon assembleDebug
+  "${IMAGE}" gradle --no-daemon \
+  -PappVersionCode="${VERSION_CODE}" \
+  -PappVersionName="${VERSION}" \
+  assembleDebug
 
 APK_SRC="${ROOT}/apps/android/app/build/outputs/apk/debug/app-debug.apk"
 if [[ ! -f "${APK_SRC}" ]]; then

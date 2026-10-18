@@ -39,6 +39,15 @@ describe('catalogue + price resolution (Phase 4)', () => {
     expect(typeof product.tax_inclusive).toBe('boolean');
   });
 
+  // Devices must be able to resolve a scan offline, so the catalogue has to carry barcodes (§5).
+  it('exports each product barcode with the catalogue so scans resolve offline', async () => {
+    const res = await auth(request(app.getHttpServer()).get('/v1/products'));
+    expect(res.status).toBe(200);
+    const product = res.body.products.find((p: { id: string }) => p.id === SEED.productA);
+    expect(Array.isArray(product.barcodes)).toBe(true);
+    expect(product.barcodes).toContain('6001000000011');
+  });
+
   it('creates a product and bumps the version on update with optimistic concurrency', async () => {
     const created = await auth(request(app.getHttpServer()).post('/v1/products')).send({
       sku: 'PH4-NEW-1',
@@ -49,6 +58,7 @@ describe('catalogue + price resolution (Phase 4)', () => {
     });
     expect(created.status).toBe(201);
     expect(created.body.version).toBe(1);
+    expect(created.body.barcodes).toEqual(['PH4001']);
     const id = created.body.id as string;
 
     const updated = await auth(request(app.getHttpServer()).patch(`/v1/products/${id}`)).send({ name: 'Renamed', priceMinor: 1500, expectedVersion: 1 });

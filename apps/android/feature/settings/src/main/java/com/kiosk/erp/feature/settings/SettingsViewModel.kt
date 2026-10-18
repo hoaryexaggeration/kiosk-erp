@@ -25,6 +25,7 @@ class SettingsViewModel(
     private val api: ApiClient,
     private val sessionStore: SessionStore,
     private val saleRepository: SaleRepository,
+    private val appVersion: String,
 ) : ViewModel() {
     private val _state = MutableStateFlow(SettingsUiState())
     val state: StateFlow<SettingsUiState> = _state
@@ -55,7 +56,7 @@ class SettingsViewModel(
                 val base = s.apiBaseUrl.trim()
                 // Login unbound to obtain a token for enrollment.
                 val unbound = api.login(base, s.email.trim(), s.password, null)
-                api.enrollDevice(base, unbound.accessToken, s.deviceId.trim(), s.branchId.trim(), "Kiosk till")
+                api.enrollDevice(base, unbound.accessToken, s.deviceId.trim(), s.branchId.trim(), "Kiosk till", appVersion)
                 // Re-login bound to the device so queued commands carry the device id.
                 val bound = api.login(base, s.email.trim(), s.password, s.deviceId.trim())
                 sessionStore.save(

@@ -57,6 +57,11 @@ Unknown aggregates return `rejected` / `UNSUPPORTED_AGGREGATE`. Every `conflictC
 an aggregate becomes a durable `conflict_cases` row (Phase 4 centralised this in the sync layer so all
 aggregate types get identical, auditable exception handling).
 
+**Downstream payloads.** Server events for `Product` (`product.created` / `product.updated`) and each
+`GET /v1/products` page carry the product's `barcodes` array. Devices cache those barcodes so a POS scan
+resolves from the local database with no network at all; `GET /v1/catalog/barcodes/:code` stays as the
+online lookup for tools and admin screens.
+
 ## 4. Push result states
 
 For each command the server returns exactly one of:

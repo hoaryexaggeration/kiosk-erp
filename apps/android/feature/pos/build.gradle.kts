@@ -45,5 +45,13 @@ dependencies {
     implementation(libs.compose.material3)
     implementation(libs.compose.material.icons.extended)
 
+    // Offline barcode scanning (§5 POS).
+    implementation(libs.androidx.activity.compose)
+    implementation(libs.androidx.camera.core)
+    implementation(libs.androidx.camera.camera2)
+    implementation(libs.androidx.camera.lifecycle)
+    implementation(libs.androidx.camera.view)
+    implementation(libs.mlkit.barcode.scanning)
+
     debugImplementation(libs.compose.ui.tooling)
 }

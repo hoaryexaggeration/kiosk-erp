@@ -17,7 +17,7 @@ import kotlinx.coroutines.launch
 
 class PosViewModel(
     private val saleRepository: SaleRepository,
-    productRepository: ProductRepository,
+    private val productRepository: ProductRepository,
     private val sessionStore: SessionStore,
 ) : ViewModel() {
 
@@ -46,6 +46,23 @@ class PosViewModel(
 
     fun addTestItem() {
         _cart.update { it + CartLine(null, "CUSTOM", "Custom item", "ea", 1.0, 1000, 0, 1600, true) }
+    }
+
+    /**
+     * Resolve a scanned (or manually entered) barcode against the LOCAL cache and add it to the cart.
+     * Fully offline: an unknown code is reported, never queued as a guess.
+     */
+    fun onBarcode(code: String) {
+        if (code.isBlank()) return
+        viewModelScope.launch {
+            val product = productRepository.findByBarcode(code)
+            if (product == null) {
+                _message.value = "No product matches barcode $code — refresh the catalogue if it is new."
+            } else {
+                addProduct(product)
+                _message.value = "Added ${product.name}"
+            }
+        }
     }
 
     fun removeAt(index: Int) {

@@ -18,6 +18,8 @@ class AppContainer(context: Context) {
     val database: KioskDatabase = KioskDatabase.build(context)
     val sessionStore: SessionStore = SessionStore(context, BuildConfig.DEFAULT_API_BASE_URL)
     val api: ApiClient = ApiClient()
+    /** Reported to the server on enrollment; sourced from the build so it cannot drift (see build.gradle.kts). */
+    val appVersion: String = BuildConfig.VERSION_NAME
 
     val saleRepository: SaleRepository = SaleRepository(database)
     val productRepository: ProductRepository = ProductRepository(database)

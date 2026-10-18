@@ -7,6 +7,7 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -47,6 +48,7 @@ data class ServerProduct(
     val version: Int,
     val taxRateBp: Int,
     val taxInclusive: Boolean,
+    val barcodes: List<String> = emptyList(),
 )
 
 data class ServerBalance(
@@ -117,7 +119,7 @@ class ApiClient {
         )
     }
 
-    suspend fun enrollDevice(baseUrl: String, token: String, deviceId: String, branchId: String, name: String) {
+    suspend fun enrollDevice(baseUrl: String, token: String, deviceId: String, branchId: String, name: String, appVersion: String) {
         withContext(Dispatchers.IO) {
             val body = buildJsonObject {
                 put("deviceId", deviceId)
@@ -125,7 +127,7 @@ class ApiClient {
                 put("name", name)
                 put("platform", "android")
                 put("isOfflineAuthoritative", true)
-                put("appVersion", "0.4.1")
+                put("appVersion", appVersion)
             }
             post(baseUrl, "devices/enroll", token, body)
         }
@@ -166,6 +168,7 @@ class ApiClient {
                 version = obj["version"]?.jsonPrimitive?.content?.toIntOrNull() ?: 1,
                 taxRateBp = obj["tax_rate_bp"]?.jsonPrimitive?.content?.toIntOrNull() ?: 0,
                 taxInclusive = obj["tax_inclusive"]?.jsonPrimitive?.content?.toBooleanStrictOrNull() ?: false,
+                barcodes = obj["barcodes"]?.jsonArray?.mapNotNull { it.jsonPrimitive.contentOrNull } ?: emptyList(),
             )
         } ?: emptyList()
     }

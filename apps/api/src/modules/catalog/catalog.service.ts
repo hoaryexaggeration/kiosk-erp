@@ -62,6 +62,7 @@ export class CatalogService {
       .where('products.id', '=', productId)
       .where('products.tenant_id', '=', tenantId)
       .executeTakeFirstOrThrow();
+    const barcodes = await this.barcodesFor(trx, tenantId, [productId]);
     return {
       id: row.id,
       sku: row.sku,
@@ -74,7 +75,30 @@ export class CatalogService {
       version: row.version,
       tax_rate_bp: row.tax_rate_bp ?? 0,
       tax_inclusive: row.tax_inclusive ?? false,
+      barcodes: barcodes.get(productId) ?? [],
     };
+  }
+
+  /**
+   * Barcodes keyed by product id. Devices cache these so a scan resolves offline (§6); the scan
+   * path must never depend on the network.
+   */
+  private async barcodesFor(trx: Kysely<Database>, tenantId: string, productIds: string[]): Promise<Map<string, string[]>> {
+    const grouped = new Map<string, string[]>();
+    if (productIds.length === 0) return grouped;
+    const rows = await trx
+      .selectFrom('barcodes')
+      .select(['product_id', 'barcode'])
+      .where('tenant_id', '=', tenantId)
+      .where('product_id', 'in', productIds)
+      .orderBy('barcode', 'asc')
+      .execute();
+    for (const row of rows) {
+      const list = grouped.get(row.product_id) ?? [];
+      list.push(row.barcode);
+      grouped.set(row.product_id, list);
+    }
+    return grouped;
   }
 
   async listProducts(tenantId: string, limit: number, offset: number, updatedSince?: string) {
@@ -100,7 +124,12 @@ export class CatalogService {
       .where('products.deleted_at', 'is', null);
     if (updatedSince) query = query.where('products.updated_at', '>', new Date(updatedSince));
     const rows = await query.orderBy('products.sku', 'asc').limit(limit).offset(offset).execute();
-    return { products: rows, limit, offset };
+    const barcodes = await this.barcodesFor(this.dbs.db, tenantId, rows.map((r) => r.id));
+    return {
+      products: rows.map((row) => ({ ...row, barcodes: barcodes.get(row.id) ?? [] })),
+      limit,
+      offset,
+    };
   }
 
   async createProduct(tenantId: string, actorId: string, correlationId: string, input: CreateProductInput) {
