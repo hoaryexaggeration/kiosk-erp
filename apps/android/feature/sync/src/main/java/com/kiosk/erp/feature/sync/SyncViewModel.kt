@@ -11,6 +11,7 @@ import com.kiosk.erp.core.database.SyncStateEntity
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
@@ -22,6 +23,8 @@ class SyncViewModel(
 
     val pendingCount: StateFlow<Int> = saleRepository.observePendingCount()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0)
+    val pendingEntries: StateFlow<List<OutboxEntity>> = saleRepository.observePendingEntries()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
     val attention: StateFlow<List<OutboxEntity>> = saleRepository.observeNeedsAttention()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
     val syncState: StateFlow<SyncStateEntity?> = saleRepository.observeSyncState()
@@ -29,21 +32,34 @@ class SyncViewModel(
     val oldestPending: StateFlow<Long?> = saleRepository.observeOldestPending()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
+    private val _syncing = MutableStateFlow(false)
+    val syncing: StateFlow<Boolean> = _syncing.asStateFlow()
+
     private val _message = MutableStateFlow<String?>(null)
     val message: StateFlow<String?> = _message
 
     fun syncNow() {
+        if (_syncing.value) return
         viewModelScope.launch {
-            _message.value = "Syncing…"
+            _syncing.value = true
+            _message.value = null
             when (val result = syncEngine.syncNow()) {
-                is SyncEngine.Result.Success -> _message.value = "Pushed ${result.pushed}, pulled ${result.pulled}${if (result.needsAttention > 0) ", ${result.needsAttention} need attention" else ""}"
-                is SyncEngine.Result.NotConfigured -> _message.value = "Not configured — set up the device in Settings"
-                is SyncEngine.Result.Failure -> _message.value = "Sync failed: ${result.message}"
+                is SyncEngine.Result.Success -> _message.value = buildString {
+                    append("Pushed ${result.pushed}, pulled ${result.pulled}")
+                    if (result.needsAttention > 0) append(" · ${result.needsAttention} need attention — see below")
+                }
+                is SyncEngine.Result.NotConfigured -> _message.value = "This device is not enrolled — finish Setup first, then sync."
+                is SyncEngine.Result.Failure -> _message.value = "Sync failed: ${result.message}. Nothing was lost; it stays queued."
             }
+            _syncing.value = false
         }
     }
 
-    /** Diagnostics helper: write a command straight to the local DB + outbox, fully offline. */
+    /**
+     * Diagnostics helper: write a command straight to the local DB + outbox, fully offline. Kept for
+     * support use and deliberately parked under a "Diagnostics" heading — a shop owner has no reason
+     * to press it, and a test sale sitting in their sales list is worse than no button at all.
+     */
     fun createTestCommand() {
         viewModelScope.launch {
             val session = sessionStore.current()
@@ -55,7 +71,7 @@ class SyncViewModel(
                 branchId = branchId,
                 deviceId = deviceId,
             )
-            _message.value = "Saved on this device: ${result.localNumber} (waiting to sync)"
+            _message.value = "Diagnostics sale ${result.localNumber} written to the local queue (waiting to sync)"
         }
     }
 

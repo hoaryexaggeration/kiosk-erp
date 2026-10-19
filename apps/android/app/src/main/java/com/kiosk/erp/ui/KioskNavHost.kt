@@ -83,9 +83,26 @@ fun KioskNavHost(container: AppContainer) {
             startDestination = "dashboard",
             modifier = Modifier.padding(padding),
         ) {
-            composable("dashboard") { DashboardScreen(viewModel(factory = factory)) }
-            composable("pos") { PosScreen(viewModel(factory = factory)) }
-            composable("inventory") { InventoryScreen(viewModel(factory = factory)) }
+            composable("dashboard") {
+                DashboardScreen(
+                    vm = viewModel(factory = factory),
+                    onOpenPos = { navController.navigate("pos") { launchSingleTop = true } },
+                    onOpenSync = { navController.navigate("sync") { launchSingleTop = true } },
+                    onOpenSetup = { navController.navigate("settings") { launchSingleTop = true } },
+                )
+            }
+            composable("pos") {
+                PosScreen(
+                    viewModel(factory = factory),
+                    onOpenCatalogue = { navController.navigate("catalog") },
+                )
+            }
+            composable("inventory") {
+                InventoryScreen(
+                    viewModel(factory = factory),
+                    onOpenCatalogue = { navController.navigate("catalog") },
+                )
+            }
             composable("sync") { SyncCenterScreen(viewModel(factory = factory)) }
             composable("settings") {
                 SettingsScreen(

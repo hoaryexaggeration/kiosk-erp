@@ -19,7 +19,19 @@ data class SettingsUiState(
     val deviceId: String = "",
     val message: String? = null,
     val configured: Boolean = false,
-)
+    val busy: Boolean = false,
+) {
+    /** Everything setup needs is already on screen. */
+    val fieldsComplete: Boolean
+        get() = apiBaseUrl.isNotBlank() &&
+            email.isNotBlank() &&
+            password.isNotBlank() &&
+            branchId.isNotBlank() &&
+            deviceId.isNotBlank()
+
+    /** Setup is a single tap only if everything it needs is present and no run is in flight. */
+    val canEnrol: Boolean get() = fieldsComplete && !busy
+}
 
 class SettingsViewModel(
     private val api: ApiClient,
@@ -47,17 +59,27 @@ class SettingsViewModel(
 
     fun update(transform: (SettingsUiState) -> SettingsUiState) = _state.update(transform)
 
+    /** Show where setup has got to, not just that something is happening. */
+    private fun step(text: String) = _state.update { it.copy(message = text, busy = true) }
+
     /** One-tap setup: login, enroll the device, then re-login bound to the device. */
     fun setup() {
+        val s = _state.value
+        if (s.busy) return
+        if (!s.fieldsComplete) {
+            _state.update { it.copy(message = "Fill in the address, email, password and identifiers first.") }
+            return
+        }
         viewModelScope.launch {
-            val s = _state.value
-            _state.update { it.copy(message = "Signing in…") }
+            step("Signing in…")
             runCatching {
                 val base = s.apiBaseUrl.trim()
                 // Login unbound to obtain a token for enrollment.
                 val unbound = api.login(base, s.email.trim(), s.password, null)
+                step("Enrolling this device…")
                 api.enrollDevice(base, unbound.accessToken, s.deviceId.trim(), s.branchId.trim(), "Kiosk till", appVersion)
                 // Re-login bound to the device so queued commands carry the device id.
+                step("Finishing…")
                 val bound = api.login(base, s.email.trim(), s.password, s.deviceId.trim())
                 sessionStore.save(
                     Session(
@@ -73,10 +95,12 @@ class SettingsViewModel(
                 )
                 saleRepository.ensureSyncState()
             }.onSuccess {
-                _state.update { it.copy(message = "Device enrolled and ready to sync", configured = true) }
+                _state.update { it.copy(message = "Device enrolled and ready to sync", configured = true, busy = false) }
             }.onFailure { err ->
-                _state.update { it.copy(message = "Setup failed: ${err.message}") }
+                _state.update { it.copy(message = "Setup failed: ${err.message}", busy = false) }
             }
         }
     }
+
+    fun clearMessage() = _state.update { it.copy(message = null) }
 }

@@ -75,6 +75,16 @@ interface SaleDao {
 
     @Query("SELECT COALESCE(SUM(totalMinor), 0) FROM sales WHERE state IN ('accepted','review_required')")
     fun observeGrossTotalMinor(): Flow<Long>
+
+    /**
+     * Provisional total: recorded on this device, not yet accepted by the server. Shown separately
+     * from the accepted total so an unsynced figure is never presented as posted money (§7).
+     */
+    @Query("SELECT COALESCE(SUM(totalMinor), 0) FROM sales WHERE state = 'pending_sync'")
+    fun observePendingTotalMinor(): Flow<Long>
+
+    @Query("SELECT COUNT(*) FROM sales")
+    fun observeSaleCount(): Flow<Int>
 }
 
 @Dao
@@ -84,6 +94,10 @@ interface OutboxDao {
 
     @Query("SELECT * FROM outbox WHERE status IN ('pending','retryable') ORDER BY createdAtEpochMs ASC LIMIT :limit")
     suspend fun pending(limit: Int = 50): List<OutboxEntity>
+
+    /** The same queue as a stream, so the Sync Centre can show what is waiting without polling. */
+    @Query("SELECT * FROM outbox WHERE status IN ('pending','retryable') ORDER BY createdAtEpochMs ASC")
+    fun observePendingEntries(): Flow<List<OutboxEntity>>
 
     @Query("SELECT * FROM outbox WHERE commandId = :commandId")
     suspend fun byId(commandId: String): OutboxEntity?

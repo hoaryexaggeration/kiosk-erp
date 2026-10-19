@@ -21,6 +21,7 @@ include(":app")
 
 // Core layer — shared, feature-agnostic capabilities.
 include(":core:common")
+include(":core:designsystem")
 include(":core:database")
 include(":core:network")
 include(":core:security")

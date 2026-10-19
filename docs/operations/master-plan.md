@@ -76,7 +76,7 @@ tested deliverable:
 | `core:sync` | inside `:core:data` (`SyncEngine`) | **Extract `:core:sync`** so outbox/push/pull/conflict handling is its own boundary |
 | `core:security` | `:core:security` | ✅ |
 | `core:device` | absent (scanning lives in `feature:pos`) | **Create `:core:device`**: camera scanning, printer adapter, share/export |
-| `core:designsystem` | absent | **Create `:core:designsystem`**: typography, spacing, offline/loading/error/empty states |
+| `core:designsystem` | `:core:designsystem` | ✅ created (UI usability pass): `Tone` + shared state components (banner, status pill, empty/error/loading, stat tile, detail/nav rows) and the app typography scale |
 | `feature:pos` | ✅ | Keep and complete |
 | `feature:catalog` | ✅ | Keep and complete |
 | `feature:inventory` | ✅ | Keep and complete |
@@ -139,7 +139,9 @@ must be completed when its target phase is reached.
 | D24 | Local database encryption at rest | §10 | 11 | ☐ |
 | D25 | CI, staging deploy, backups + restore drill, rate limits | §15 Ph2 | 2 residual | ☐ |
 | D26 | OpenAPI document + generated client metadata | §9, §15 Ph1 | 1 residual | ☐ |
-| D27 | Adopt `:core:domain`, `:core:sync`, `:core:device`, `:core:designsystem` module split | §5 | 3 residual | ☐ |
+| D27 | *(split below)* Adopt the §5 module reorganisation | §5 | 3 residual | ◐ |
+| D27a | `:core:designsystem` — shared offline/empty/error/loading state components + typography, so every screen speaks the same language | §5 | done early (needed by the UI pass) | ✔ |
+| D27b | Adopt `:core:domain`, `:core:sync`, `:core:device` module split (the rest of D27) | §5 | 3 residual | ☐ |
 | D28 | `LicenseManager`: renewal request export (`.licreq`/QR), entitlement display, Keystore installation key, replay/rollback detection | §13.4, §15 Ph3 | 3 residual | ☐ |
 | D29 | Licence lifecycle pilot (duplicate/replay rejection, device transfer, maintenance expiry without core shutdown) | §15 Ph12 | 12 | ☐ |
 
@@ -166,6 +168,50 @@ each later phase is expanded to the same granularity as it becomes current.
 | 4.9 | Low-stock thresholds and alerts (D8) | Threshold breach is visible on the Stock screen |
 | 4.10 ✔ | Movement history UI per product/location (D8) | Done: per-product history in the Stock tab (source, signed quantity, reason, date, COGS); reads the server ledger |
 | 4.11 | Price lists / branch prices / scheduled prices + price-change history (D5) | A price change is versioned; a stale device price is flagged, never silently overwritten |
+
+#### UI usability pass (v0.4.3, between 4.4 and 4.5)
+
+Owner request before continuing: *make the UI user friendly*. Not a phase item — an overhaul of what
+had been built so far, done inside the phase-4 APK so the rest of the plan is built on screens worth
+using.
+
+- **New `:core:designsystem` (D27a).** One vocabulary for the state every screen has to express:
+  `Banner` (offline / saved / failed, with an optional action), `Pill` (status word + tone),
+  `EmptyState`, `ErrorState` with retry, `LoadingState`, `StatTile`, `DetailRow`, `NavRow`, `SectionTitle`,
+  `ScreenHeader`. Tones are theme-aware so a status chip stays readable in sunlight *and* at night, and
+  every tinted state carries its meaning in **words** — colour alone never says anything (§5).
+- **Typography**: body 15sp, labels 13/15sp, titles with real weight contrast — arm's-length legibility
+  without shrinking things below comfortable tap or read size.
+- **Home**: §7's separation of money is now on screen — *Accepted by the server* beside *Waiting to
+  upload* (provisional, labelled as such), plus a sync card whose **connection and queue are separate
+  rows** (§16: a green network icon is not enough), recent sales with per-sale state pills, and an
+  enrolment banner that routes to Setup when the device cannot sync yet.
+- **Till**: "Test item" scaffolding buttons removed; `Find items ⇄ Cart` toggle so a 20-line basket
+  still shows the total; cart lines now have quantity steppers and a remove button (the total bar
+  always visible); inactive products are hidden from the till and cannot be added; scan result shown
+  as a dismissible success/error banner; clearing the cart asks first; every empty state names the
+  next step.
+- **Stock**: leads with on-hand per product, search, and adjust behind a dialog that shows
+  *current → after this change* and warns when it would go negative (server would require a
+  supervisor override). Movement history restyled with source pills and costed-out losses.
+- **Sync Center**: headline status word, then the two facts kept apart — *Waiting to upload* and
+  *Connection* — followed by needs-attention cards that translate the conflict code into the next
+  action, the waiting queue, and a **Diagnostics** section so the support-only test command is no
+  longer mixed in with normal controls.
+- **Setup**: sections with plain-language captions, status pill (Ready to sync / Not enrolled), the two
+  opaque UUIDs moved into a labelled *Device identifiers* block, email/password keyboard types and
+  password masking, disabled + progress states on enrol.
+- **Catalogue**: search with clear, All/Active/Inactive filter, price right-aligned, overflow menu for
+  edit/deactivate, dismissible result banners, offline banner, sectioned product editor
+  (Identity / Pricing / Selling unit / Category & tax / Stock & status / Barcodes), and an import
+  preview headed by a valid-or-problem pill.
+- **Licence**: what each of the two crypto boxes is, verification refused until both are present, and
+  the outcome reported as one word before the detail.
+- **Accessibility**: content descriptions on every icon, ≥44–48dp targets on primary controls, no
+  state conveyed by colour alone, error text never truncated.
+
+Still to do when its phase arrives: cashier session and role gate (5.2), oversell block (5.2a),
+weight/decimal quantity entry (5.3), sales history screen (5.11), opening-stock import (4.5).
 
 ### Phase 5 — Offline POS vertical slice (current phase)
 

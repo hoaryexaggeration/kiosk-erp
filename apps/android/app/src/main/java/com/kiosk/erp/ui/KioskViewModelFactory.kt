@@ -19,7 +19,7 @@ import com.kiosk.erp.feature.sync.SyncViewModel
 class KioskViewModelFactory(private val container: AppContainer) : ViewModelProvider.Factory {
     override fun <T : ViewModel> create(modelClass: Class<T>): T = when {
         modelClass.isAssignableFrom(DashboardViewModel::class.java) ->
-            DashboardViewModel(container.saleRepository)
+            DashboardViewModel(container.saleRepository, container.sessionStore)
         modelClass.isAssignableFrom(PosViewModel::class.java) ->
             PosViewModel(container.saleRepository, container.productRepository, container.sessionStore)
         modelClass.isAssignableFrom(CatalogViewModel::class.java) ->

@@ -5,13 +5,21 @@ Required by §15 "Mandatory Android APK delivery gate". Every field below is par
 | Field | Value |
 |---|---|
 | **Phase** | 4 — Catalogue, pricing/promotions and inventory (+ post-phase polish) |
-| **App version** | `0.4.1` (versionCode 5) |
-| **Artifact** | `artifacts/retail-erp-p04-v0.4.1.apk` |
-| **SHA-256** | `74caefeab641af20b08eb039759629072eaf9981adf0b2a08cb1489e7ef3b108` |
-| **Size** | ~17.9 MB |
+| **App version** | `0.4.3` (versionCode 403) |
+| **Artifact** | `artifacts/retail-erp-p04-v0.4.3.apk` |
+| **SHA-256** | `cb6bbe8d363fa8433607463030c4aca8030c4a54bdf81b6077d117822a5db719` |
+| **Size** | ~40.2 MB (bundled ML Kit barcode models, unminified debug build) |
 | **Signing** | **Stable internal-test key** (`CN=Kiosk ERP Internal Test`, cert SHA-256 `935c0fbc6993db9ca761b4c3610c71a50d91897fd9b1753d0da3e56dffd056dd`), generated once by `build-apk.sh` and git-ignored (ADR 0005) |
-| **Build** | Docker image `kiosk-erp-android-builder` (JDK 17 + Android SDK 34 + Gradle 8.7); `PHASE=04 VERSION=0.4.0 bash infra/docker/android/build-apk.sh` |
+| **Build** | Docker image `kiosk-erp-android-builder` (JDK 17 + Android SDK 34 + Gradle 8.7); `PHASE=04 VERSION=0.4.3 bash infra/docker/android/build-apk.sh` |
 | **Expected backend** | `apps/api` on `http://<host>:3000/v1`; seed tenant/branch from `seed-dev.ts` |
+
+**Build history inside Phase 4** (each is signed with the same stable key, so each upgrades in place):
+
+| Version | versionCode | SHA-256 (first 16) | What it added |
+|---|---|---|---|
+| `0.4.1` | 401 | `74caefeab641af20` | Catalogue management UI, dated promotions, inventory movements, multi-module split, launcher icon |
+| `0.4.2` | 402 | `65580399f57da74e` | Offline camera scanner (5.1), FIFO valuation (ADR 0009), barcode editing, catalogue import file picker, per-product movement history |
+| `0.4.3` | 403 | `cb6bbe8d363fa843` | UI usability pass: `:core:designsystem`, redesigned Home / Till / Stock / Sync / Setup / Catalogue / Licence |
 
 > **Upgrade note.** Phase 3's APK was signed with the throwaway Android debug key, so it **cannot be
 > upgraded in place** by this build (signature mismatch) — uninstall the Phase 3 build first. This is
@@ -28,8 +36,18 @@ Server (`apps/api`):
   promotions mean a sale can be re-priced against the policy that was live when it was rung up.
   `GET /v1/pricing/resolve`.
 - **Inventory** (`InventoryService`): one append-only write path (`applyMovement`) shared by sales,
-  receipts and adjustments. `StockReceipt` rolls a **weighted-average cost**; `StockAdjustment`
-  requires a reason. Read models `GET /v1/inventory/balances` and `/movements`.
+  receipts and adjustments. `StockAdjustment` requires a reason, and a decrease that would take stock
+  negative additionally requires `approvedBy` / `approvalNote`. Read models `GET /v1/inventory/balances`
+  and `/movements`; `GET /v1/inventory/:id/movements` gives a product's full history (item 4.10).
+  - **Costing superseded by ADR 0009.** Weighted average — as this record originally described — was
+    replaced by **FIFO with valuation layers** (migration `0004`): `inventory_valuation_layers` holds
+    each receipt tranche, `inventory_movements.cogs_minor` records the derived cost of each outbound
+    movement, `GET /v1/inventory/valuation` reports the position, and opening stock is seeded as
+    movements + layers so balance, ledger and valuation agree from the first sale.
+- **Bulk catalogue import** (item 4.4): `POST /v1/products/import` runs one pure planner for both
+  preview and commit, so the report an operator approves is exactly what a commit does; a file with
+  any bad row writes **nothing**. RFC 4180 reader with `line` numbers that match the operator's
+  spreadsheet, `409 DUPLICATE_BARCODE` on clashing barcodes, and 18 unit + 8 endpoint tests.
 - **Catalogue editing**: `PATCH /v1/products/:id` with optimistic `expectedVersion`, plus
   `tax-categories` and `categories` CRUD. Product deltas are emitted as `product.created` /
   `product.updated` server events carrying the exact client DTO.
@@ -70,16 +88,62 @@ Post-phase polish (owner-requested, `docs/operations/roadmap.md` P1–P2):
   now **Home · POS · Stock · Sync · Setup**, with the bar staying highlighted while browsing an
   admin screen.
 
+Phase 4 close-out (`0.4.2`):
+
+- **Offline camera scanning (5.1)**: ML Kit barcode models bundled in the APK, CameraX preview with a
+  scan overlay, and a manual-entry fallback. A successful scan now visibly adds the item (the original
+  overlay bug where nothing appeared to happen was fixed).
+- **Catalogue import file picker** (item 4.4, device side): pick a CSV/JSON file → show the *server's*
+  row-by-row preview → commit only when the report is valid; an invalid file commits nothing and stays
+  on screen with its problems.
+- **Barcode set editing** (item 4.1 / D9): the editor and the device cache replace a product's barcode
+  set rather than only ever adding to it, and the payload no longer drops `tax_category_id`.
+- **Per-product movement history** (item 4.10) in the Stock tab: source, signed quantity, reason, date
+  and costed-out losses, read from the server ledger rather than reconstructed locally.
+
+UI usability pass (`0.4.3`, owner-requested before continuing — full detail in `master-plan.md` §4):
+
+- **New `:core:designsystem` module** (D27a): `Banner` (offline/saved/failed), `Pill` (status word +
+  tone), `EmptyState`, `ErrorState` with retry, `LoadingState`, `StatTile`, `DetailRow`, `NavRow`,
+  `SectionTitle`, `ScreenHeader`, plus a theme-aware `Tone`. **Every state is named in words, never
+  implied by colour alone**, and the tones flip polarity between light and dark so a status chip stays
+  readable in sunlight.
+- **Typography scale** raised (body 15sp, weight-based hierarchy) for arm's-length reading at the till.
+- **Home**: §7's money split made visible — *Accepted by the server* beside *Waiting to upload*
+  (provisional, labelled as such); a sync card that reports **connection and queue as separate rows**
+  (§16: a green network icon is not enough); recent sales with per-sale state pills; an enrolment
+  banner that routes to Setup when the device cannot sync yet.
+- **Till**: "Test item" scaffolding buttons removed; a `Find items ⇄ Cart` toggle so a 20-line basket
+  still shows the total; quantity steppers and a remove button on cart lines; inactive products hidden
+  and refused; scan outcome shown as a dismissible success/error banner; clearing the cart asks first;
+  empty states name the next step.
+- **Stock**: on-hand per product leads the screen, with search and an adjust dialog that shows
+  *current → after this change* and warns when it would go negative (which the server would send back
+  for supervisor review).
+- **Sync Center**: headline status word, then `Waiting to upload` and `Connection` as **separate
+  facts**, needs-attention cards that translate each conflict code into the next action, the waiting
+  queue, and a `Diagnostics` section so the support-only test command is no longer mixed in with
+  normal controls.
+- **Setup**: sections with plain-language captions, a Ready-to-sync / Not-enrolled pill, the two opaque
+  UUIDs moved into a labelled *Device identifiers* block, correct keyboard types + password masking,
+  and disabled/progress states on enrol.
+- **Catalogue**: search with clear, All/Active/Inactive filter, right-aligned price, overflow menu for
+  edit/deactivate, dismissible result banners, sectioned product editor, and an import preview headed
+  by a valid-or-problem pill.
+- **Licence**: explains what each of the two cryptographic boxes is, refuses to run an incomplete pair,
+  and reports the outcome as one word before the detail.
+- **Accessibility**: content descriptions on every icon, ≥44–48dp primary targets, error text never
+  truncated, no state conveyed by colour alone.
+
 ## Verification
 
-- `npm --workspace apps/api run test`: **26/26** pass (unit + integration against Docker Postgres),
-  including a new `inventory.spec.ts` (receipt → weighted-average cost, idempotency, adjustment,
-  negative-stock `review_required` + `NEGATIVE_STOCK` case, read models, and cashier `FORBIDDEN`) and
-  `catalog-pricing.spec.ts` (tax rates in the catalogue, optimistic version bump + `VERSION_MISMATCH`,
-  product delta events, and `asOf` promotion resolution).
-- `npm run fixtures:check`: 34/34.
+- `npm run verify` (fixtures + API tests): **49/49** domain-fixture checks and **58/58 API tests**
+  across 8 suites — auth, catalog-import, catalog-pricing, inventory, licensing, sync-sale, plus the
+  `product-import` and `domain-fixtures` unit suites — against Docker Postgres.
 - `tsc -p tsconfig.build.json --noEmit`: clean.
-- Docker APK build across 13 Gradle modules: clean, **zero Kotlin warnings**.
+- Docker APK build across **14** Gradle modules: clean, **zero Kotlin warnings**. Verified with a full
+  `clean assembleDebug` run under `--no-build-cache`, so every module's Kotlin compile actually
+  executed — a build-cache hit replays no output and would have hidden any warning.
 - APK signature verified with `apksigner verify --print-certs` (internal-test identity, see table).
 
 ## Known limitations (phase-scoped)
@@ -88,8 +152,9 @@ Post-phase polish (owner-requested, `docs/operations/roadmap.md` P1–P2):
 - Receipts are touch-entry only; camera barcode scanning and printer adapters remain Phase 5.
 - No shift/session screen yet (Phase 6); `cashSessionId` is nullable.
 - Adjustments support a single line per command in the UI (the server accepts multi-line).
-- Costing uses branch-level weighted average on receipt only; full stocktake reconciliation and
-  approvals (`approved_by` is persisted but not yet populated by a UI flow) land later.
+- **Costing is FIFO with valuation layers** (ADR 0009); full stocktake reconciliation and approvals
+  (`approved_by` is populated by the negative-adjustment override flow) land with stocktake (4.8) and
+  cash/shift approvals (Phase 6).
 - Module build files are currently explicit per module; convention plugins are a possible
   consolidation if the configuration phase becomes a bottleneck (ADR 0007).
 
@@ -108,6 +173,14 @@ Post-phase polish (owner-requested, `docs/operations/roadmap.md` P1–P2):
 | 6 | Reconnect → **Sync now** → adjustment accepted; server balance reflects it | ☐ |
 | 7 | As `cashier@kiosk.test`, an adjustment is **rejected** server-side (`FORBIDDEN`) | ☐ |
 | 8 | Server-side catalogue edit appears on the device after a sync (delta applied) | ☐ |
+| 9 | Home shows **Accepted by the server** and **Waiting to upload** as two separate figures, each labelled | ☐ |
+| 10 | With a queued sale and no network: Sync reads "Offline · N waiting", and **Connection** reads "No connection to the server" as a *separate* row | ☐ |
+| 11 | Till: step a cart line up and down, remove a line, **Clear** asks for confirmation, total stays visible throughout | ☐ |
+| 12 | Till: a deactivated product is absent from the list and refused with a message if scanned/added | ☐ |
+| 13 | Stock: the adjust dialog shows *current → after this change*; going below zero shows the supervisor-override warning | ☐ |
+| 14 | Setup: password is masked, **Enrol this device** stays disabled until every field is filled | ☐ |
+| 15 | Catalogue: search + All/Active/Inactive filter, and a product edit shows the six labelled sections | ☐ |
+| 16 | Every icon-only control announces a content description (TalkBack reads "Back", "Clear search", "Add … to the cart") | ☐ |
 
 A failure involving lost transactions, duplicate posting, corrupted local data or a false
 payment/tax status blocks the phase.

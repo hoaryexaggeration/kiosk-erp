@@ -36,9 +36,12 @@ class SaleRepository(private val db: KioskDatabase) {
 
     fun observeRecentSales(): Flow<List<SaleEntity>> = db.saleDao().observeRecent()
     fun observePendingCount(): Flow<Int> = db.outboxDao().observePendingCount()
+    fun observePendingEntries(): Flow<List<OutboxEntity>> = db.outboxDao().observePendingEntries()
     fun observeNeedsAttention(): Flow<List<OutboxEntity>> = db.outboxDao().observeNeedsAttention()
     fun observeNeedsAttentionCount(): Flow<Int> = db.outboxDao().observeNeedsAttentionCount()
     fun observeGrossTotalMinor(): Flow<Long> = db.saleDao().observeGrossTotalMinor()
+    fun observePendingTotalMinor(): Flow<Long> = db.saleDao().observePendingTotalMinor()
+    fun observeSaleCount(): Flow<Int> = db.saleDao().observeSaleCount()
     fun observeOldestPending(): Flow<Long?> = db.outboxDao().observeOldestPendingEpochMs()
     fun observeSyncState(): Flow<SyncStateEntity?> = db.syncStateDao().observe()
 
