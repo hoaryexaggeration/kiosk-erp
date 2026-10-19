@@ -5,13 +5,13 @@ Required by §15 "Mandatory Android APK delivery gate". Every field below is par
 | Field | Value |
 |---|---|
 | **Phase** | 4 — Catalogue, pricing/promotions and inventory (+ post-phase polish) |
-| **App version** | `0.4.3` (versionCode 403) |
-| **Artifact** | `artifacts/retail-erp-p04-v0.4.3.apk` |
-| **SHA-256** | `cb6bbe8d363fa8433607463030c4aca8030c4a54bdf81b6077d117822a5db719` |
+| **App version** | `0.4.4` (versionCode 404) |
+| **Artifact** | `artifacts/retail-erp-p04-v0.4.4.apk` |
+| **SHA-256** | `9e45a6a88b15100817773875f59ec99e174df86a93aa37cefc9ab508a724d7e7` |
 | **Size** | ~40.2 MB (bundled ML Kit barcode models, unminified debug build) |
 | **Signing** | **Stable internal-test key** (`CN=Kiosk ERP Internal Test`, cert SHA-256 `935c0fbc6993db9ca761b4c3610c71a50d91897fd9b1753d0da3e56dffd056dd`), generated once by `build-apk.sh` and git-ignored (ADR 0005) |
-| **Build** | Docker image `kiosk-erp-android-builder` (JDK 17 + Android SDK 34 + Gradle 8.7); `PHASE=04 VERSION=0.4.3 bash infra/docker/android/build-apk.sh` |
-| **Expected backend** | `apps/api` on `http://<host>:3000/v1`; seed tenant/branch from `seed-dev.ts` |
+| **Build** | Docker image `kiosk-erp-android-builder` (JDK 17 + Android SDK 34 + Gradle 8.7); `PHASE=04 VERSION=0.4.4 bash infra/docker/android/build-apk.sh` |
+| **Expected backend** | `apps/api` on `http://<host>:3000/v1`; seed tenant/branch from `seed-dev.ts` (20-product demo catalogue, see `demo-catalogue.md`) |
 
 **Build history inside Phase 4** (each is signed with the same stable key, so each upgrades in place):
 
@@ -20,6 +20,7 @@ Required by §15 "Mandatory Android APK delivery gate". Every field below is par
 | `0.4.1` | 401 | `74caefeab641af20` | Catalogue management UI, dated promotions, inventory movements, multi-module split, launcher icon |
 | `0.4.2` | 402 | `65580399f57da74e` | Offline camera scanner (5.1), FIFO valuation (ADR 0009), barcode editing, catalogue import file picker, per-product movement history |
 | `0.4.3` | 403 | `cb6bbe8d363fa843` | UI usability pass: `:core:designsystem`, redesigned Home / Till / Stock / Sync / Setup / Catalogue / Licence |
+| `0.4.4` | 404 | `9e45a6a88b151008` | Scan-to-add made reliable (catalogue pulls itself on enrol/sync, paged fetch), scanner-first till, Products row on Home, 20-product demo catalogue |
 
 > **Upgrade note.** Phase 3's APK was signed with the throwaway Android debug key, so it **cannot be
 > upgraded in place** by this build (signature mismatch) — uninstall the Phase 3 build first. This is
@@ -135,12 +136,42 @@ UI usability pass (`0.4.3`, owner-requested before continuing — full detail in
 - **Accessibility**: content descriptions on every icon, ≥44–48dp primary targets, error text never
   truncated, no state conveyed by colour alone.
 
+Scan-to-add + demo catalogue (`0.4.4`, owner-requested before continuing to 4.5):
+
+- **The till's catalogue now fills itself.** Enrolment finishes with a first sync, and `SyncEngine`
+  refreshes the catalogue whenever a pull carries a product event **or** the device has none at all.
+  The second half was the actual bug behind "scan adds nothing": a shop that was already live — and
+  the dev seed, which writes no `server_events` — emits no product deltas, so a brand-new till pulled
+  an empty feed, showed an empty product list and answered every scan with "no product matches" until
+  somebody found Setup → Catalogue → Refresh by hand. A failed catalogue refresh still never fails a
+  sync: commands are the critical path, caches are conveniences.
+- **Catalogue fetch walks every page.** It requested `products?limit=500` exactly once, so anything
+  past the server's 500-row ceiling was invisible to the scanner; it now pages until the server returns
+  a short page, with an explicit ceiling so a bad response cannot spin.
+- **Scanner-first till** (§5): a full-width *Scan a barcode* button now sits ahead of the search box on
+  both halves of the loop, so a till driven by a barcode gun never has to touch the keyboard. The
+  header's lone Scan button was removed rather than duplicated.
+- **Scan results confirm themselves.** The banner names the item, the cart count and the running total
+  — "Added Sugar 1kg · cart 3 items · 540.00 KES" — instead of only the product name, so "did it
+  add?" is answerable without hunting for a badge. An unknown code now says what to do next.
+- **Home gained a Products row**, so browsing the catalogue is one tap from the first screen instead
+  of a trip through Setup.
+- **Demo catalogue** (`seed-dev.ts`, documented in `docs/operations/demo-catalogue.md`): 20 products
+  across 5 categories, 18 barcodes (one item carrying two tags, two carrying none), 16 further
+  opening-stock movements + FIFO valuation layers, a zero-rated tax category beside VAT 16%, an item
+  that is not stock-tracked, an item with no stock at all and a deactivated item that must never
+  reach the till. The two original seeded barcodes are untouched — they are pinned by the test suite —
+  and every tag added since is a valid EAN-13. The seed stays idempotent.
+
 ## Verification
 
 - `npm run verify` (fixtures + API tests): **49/49** domain-fixture checks and **58/58 API tests**
   across 8 suites — auth, catalog-import, catalog-pricing, inventory, licensing, sync-sale, plus the
   `product-import` and `domain-fixtures` unit suites — against Docker Postgres.
 - `tsc -p tsconfig.build.json --noEmit`: clean.
+- `seed:dev` run twice against a freshly migrated database: **20 products / 18 barcodes / 18 opening
+  movements** both times — the expanded demo catalogue is still idempotent, and the suites above run
+  against it.
 - Docker APK build across **14** Gradle modules: clean, **zero Kotlin warnings**. Verified with a full
   `clean assembleDebug` run under `--no-build-cache`, so every module's Kotlin compile actually
   executed — a build-cache hit replays no output and would have hidden any warning.
@@ -181,6 +212,9 @@ UI usability pass (`0.4.3`, owner-requested before continuing — full detail in
 | 14 | Setup: password is masked, **Enrol this device** stays disabled until every field is filled | ☐ |
 | 15 | Catalogue: search + All/Active/Inactive filter, and a product edit shows the six labelled sections | ☐ |
 | 16 | Every icon-only control announces a content description (TalkBack reads "Back", "Clear search", "Add … to the cart") | ☐ |
+| 17 | Fresh install → Setup → **Enrol**: the product list appears **without** opening the catalogue first, and scanning `6001000000032` adds Sugar 1kg with a banner naming the item, the cart count and the running total | ☐ |
+| 18 | Home → **Products** opens the catalogue in one tap and shows all 20 seeded products across 5 categories | ☐ |
+| 19 | Till: **Scan a barcode** sits above the search box on both *Find items* and *Cart*; `6001000000087` and `6001000000216` both add Soda 300ml; an unknown code says what to do next; the deactivated Dishwashing liquid never appears in the list | ☐ |
 
 A failure involving lost transactions, duplicate posting, corrupted local data or a false
 payment/tax status blocks the phase.

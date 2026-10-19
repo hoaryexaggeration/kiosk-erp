@@ -5,6 +5,7 @@ import androidx.lifecycle.viewModelScope
 import com.kiosk.erp.core.data.repository.SaleRepository
 import com.kiosk.erp.core.data.session.Session
 import com.kiosk.erp.core.data.session.SessionStore
+import com.kiosk.erp.core.data.sync.SyncEngine
 import com.kiosk.erp.core.network.ApiClient
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -37,6 +38,7 @@ class SettingsViewModel(
     private val api: ApiClient,
     private val sessionStore: SessionStore,
     private val saleRepository: SaleRepository,
+    private val syncEngine: SyncEngine,
     private val appVersion: String,
 ) : ViewModel() {
     private val _state = MutableStateFlow(SettingsUiState())
@@ -62,7 +64,7 @@ class SettingsViewModel(
     /** Show where setup has got to, not just that something is happening. */
     private fun step(text: String) = _state.update { it.copy(message = text, busy = true) }
 
-    /** One-tap setup: login, enroll the device, then re-login bound to the device. */
+    /** One-tap setup: login, enroll the device, re-login bound to the device, then pull the data. */
     fun setup() {
         val s = _state.value
         if (s.busy) return
@@ -95,9 +97,31 @@ class SettingsViewModel(
                 )
                 saleRepository.ensureSyncState()
             }.onSuccess {
-                _state.update { it.copy(message = "Device enrolled and ready to sync", configured = true, busy = false) }
+                _state.update { it.copy(message = "Device enrolled — pulling the catalogue and stock…", configured = true, busy = true) }
+                firstSync()
             }.onFailure { err ->
                 _state.update { it.copy(message = "Setup failed: ${err.message}", busy = false) }
+            }
+        }
+    }
+
+    /**
+     * The first pull after enrolment is what actually puts products on this till. A shop that was
+     * already live — or the dev seed — emits no product events, so without this a brand-new device
+     * would sit on an empty product list and every scan would answer "no product matches" until
+     * somebody found Sync Centre by hand. It runs detached and reports separately: a device that
+     * enrolled offline is still enrolled, and sync will catch up by itself later.
+     */
+    private fun firstSync() {
+        viewModelScope.launch {
+            val pulled = runCatching { syncEngine.syncNow() }.getOrNull()
+            _state.update {
+                when (pulled) {
+                    is SyncEngine.Result.Success ->
+                        it.copy(message = "Device enrolled. Catalogue and stock synced.", busy = false)
+                    else ->
+                        it.copy(message = "Device enrolled. It will pull the catalogue on the next sync.", busy = false)
+                }
             }
         }
     }

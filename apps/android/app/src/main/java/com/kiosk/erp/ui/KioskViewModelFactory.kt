@@ -31,7 +31,7 @@ class KioskViewModelFactory(private val container: AppContainer) : ViewModelProv
         modelClass.isAssignableFrom(LicenseViewModel::class.java) ->
             LicenseViewModel()
         modelClass.isAssignableFrom(SettingsViewModel::class.java) ->
-            SettingsViewModel(container.api, container.sessionStore, container.saleRepository, container.appVersion)
+            SettingsViewModel(container.api, container.sessionStore, container.saleRepository, container.syncEngine, container.appVersion)
         else -> throw IllegalArgumentException("Unknown ViewModel: ${modelClass.name}")
     } as T
 }

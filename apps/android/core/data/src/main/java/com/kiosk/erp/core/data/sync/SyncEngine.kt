@@ -90,8 +90,18 @@ class SyncEngine(
             // Pull deltas after push.
             val state = db.syncStateDao().get() ?: SyncStateEntity(1, 0, null, null, false, null)
             val page = api.pull(baseUrl, token, state.cursor)
+            var sawProductEvent = false
             for (event in page.events) {
-                applyServerEvent(event)
+                if (applyServerEvent(event)) sawProductEvent = true
+            }
+
+            // Fill the catalogue whenever the pull changed it, or whenever this device has none at
+            // all. The second half matters more than it looks: a seeded or already-live shop writes
+            // no product events, so a brand-new till would pull an empty feed and stay empty — no
+            // products to view, and every scan would answer "no product matches". A failure here must
+            // not fail the sync: commands are the critical path, caches are conveniences.
+            if (sawProductEvent || db.productDao().count() == 0) {
+                runCatching { productRepository.refreshProducts(api.serverProducts(baseUrl, token)) }
             }
 
             // Refresh the server-derived balance projection. A failure here must not fail the whole
@@ -110,14 +120,20 @@ class SyncEngine(
         }
     }
 
-    /** Apply an ordered server delta to the local cache. Unknown event types are ignored forward-compatibly. */
-    private suspend fun applyServerEvent(event: JsonObject) {
+    /**
+     * Apply an ordered server delta to the local cache. Unknown event types are ignored
+     * forward-compatibly. Returns true when the event was a product change, so the caller knows a
+     * full catalogue refresh is worth the round trip.
+     */
+    private suspend fun applyServerEvent(event: JsonObject): Boolean {
         val aggregateType = event["aggregateType"]?.jsonPrimitive?.content
-        val eventType = event["eventType"]?.jsonPrimitive?.content ?: return
-        val payload = event["payload"] as? JsonObject ?: return
-        when {
-            aggregateType == "Product" && (eventType == "product.created" || eventType == "product.updated") ->
-                productRepository.applyProductEvent(payload)
+        val eventType = event["eventType"]?.jsonPrimitive?.content ?: return false
+        val payload = event["payload"] as? JsonObject ?: return false
+        return if (aggregateType == "Product" && (eventType == "product.created" || eventType == "product.updated")) {
+            productRepository.applyProductEvent(payload)
+            true
+        } else {
+            false
         }
     }
 }

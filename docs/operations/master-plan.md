@@ -213,6 +213,32 @@ using.
 Still to do when its phase arrives: cashier session and role gate (5.2), oversell block (5.2a),
 weight/decimal quantity entry (5.3), sales history screen (5.11), opening-stock import (4.5).
 
+#### Scan-to-add + demo catalogue (v0.4.4, still between 4.4 and 4.5)
+
+Owner request before continuing: *add scan-to-add and make sure it adds, let me view the products, and
+seed a catalogue worth testing against*. Three findings came out of tracing the scan path end to end:
+
+- **Why a scan added nothing.** `GET /v1/products` returns barcodes, `barcodes` are cached as a SET,
+  and the scan resolves from Room — all correct. What was missing was a way for the catalogue to ever
+  *arrive*: the sync engine applied product deltas but only refreshed the catalogue on demand, and a
+  shop that already exists (including `seed-dev.ts`, which writes no `server_events`) produces no
+  deltas at all. A brand-new till therefore pulled an empty feed, listed no products and answered
+  every scan with "no product matches" until somebody found Setup → Catalogue → Refresh. Now:
+  enrolment finishes with a first sync, and `SyncEngine` refreshes the catalogue whenever a pull
+  carries a product event **or** the device has none at all. A failed refresh never fails a sync.
+- **Page ceiling.** The catalogue fetch requested `limit=500` exactly once, so past 500 SKUs the
+  scanner could never see a product. It now pages until the server returns a short page, with an
+  explicit ceiling so it cannot spin.
+- **Scanner-first and visible confirmation** (§5): a full-width *Scan a barcode* button sits ahead of
+  the search box on both halves of the loop, and a successful add names the item, the cart count and
+  the running total in the banner. Home gained a **Products** row so the catalogue is one tap from
+  the first screen.
+- **Demo catalogue** (20 products / 5 categories / 18 EAN-13 barcodes / 16 further opening movements
+  + FIFO layers): a zero-rated line beside VAT 16%, an item with two tags, two with none, one with no
+  stock, one not stock-tracked and one deactivated. Documented row by row in
+  `docs/operations/demo-catalogue.md`; still idempotent, and the two original barcodes that the test
+  suite pins are untouched.
+
 ### Phase 5 — Offline POS vertical slice (current phase)
 
 | # | Item | Exit criterion |

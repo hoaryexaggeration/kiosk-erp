@@ -53,7 +53,12 @@ class PosViewModel(
                 current + CartLine(product.id, product.sku, product.name, product.unit, 1.0, product.priceMinor, 0, product.taxRateBp, product.taxInclusive)
             }
         }
-        _notice.value = PosNotice("Added ${product.name}")
+        // Name the count and the running total, not just the product: the cashier needs to see that
+        // the tap or the scan landed, and by how much, without hunting for a change in a badge.
+        val lines = _cart.value.size
+        _notice.value = PosNotice(
+            "Added ${product.name} · cart $lines item${if (lines == 1) "" else "s"} · ${Pricing.formatMinor(totals().totalMinor)} KES",
+        )
     }
 
     /**
@@ -70,7 +75,10 @@ class PosViewModel(
             val product = productRepository.findByBarcode(code)
             when {
                 product == null -> {
-                    _notice.value = PosNotice("No product matches barcode $code — refresh the catalogue if it is new.", isError = true)
+                    _notice.value = PosNotice(
+                        "No product matches barcode $code. Pull the catalogue with Sync, or add the product in Setup → Catalogue.",
+                        isError = true,
+                    )
                     onOutcome(false)
                 }
                 !product.isActive -> {

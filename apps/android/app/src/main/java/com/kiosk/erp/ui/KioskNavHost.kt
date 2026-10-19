@@ -89,6 +89,7 @@ fun KioskNavHost(container: AppContainer) {
                     onOpenPos = { navController.navigate("pos") { launchSingleTop = true } },
                     onOpenSync = { navController.navigate("sync") { launchSingleTop = true } },
                     onOpenSetup = { navController.navigate("settings") { launchSingleTop = true } },
+                    onOpenCatalogue = { navController.navigate("catalog") { launchSingleTop = true } },
                 )
             }
             composable("pos") {

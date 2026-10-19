@@ -94,19 +94,24 @@ fun PosScreen(vm: PosViewModel, onOpenCatalogue: () -> Unit = {}) {
         ScreenHeader(
             title = "Point of Sale",
             subtitle = "Scan or search · works offline, uploads when connected",
-            actions = {
-                Button(onClick = { scanning = true }, modifier = Modifier.heightIn(min = 44.dp)) {
-                    Icon(Icons.Filled.QrCodeScanner, contentDescription = null)
-                    Spacer(Modifier.width(6.dp))
-                    Text("Scan")
-                }
-            },
         )
         Spacer(Modifier.height(StackGap))
 
         Row(horizontalArrangement = Arrangement.spacedBy(StackGap)) {
             ToggleButton("Find items", selected = !showCart, onClick = { showCart = false }, modifier = Modifier.weight(1f))
             ToggleButton("Cart (${cart.size})", selected = showCart, onClick = { showCart = true }, modifier = Modifier.weight(1f))
+        }
+        Spacer(Modifier.height(StackGap))
+
+        // Scanner-first (§5): the physical input sits ahead of the keyboard, on both halves of the
+        // loop, so a till that is driven by a gun never has to touch the search box at all.
+        Button(
+            onClick = { scanning = true },
+            modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
+        ) {
+            Icon(Icons.Filled.QrCodeScanner, contentDescription = null)
+            Spacer(Modifier.width(8.dp))
+            Text("Scan a barcode")
         }
         Spacer(Modifier.height(StackGap))
 
@@ -141,7 +146,7 @@ fun PosScreen(vm: PosViewModel, onOpenCatalogue: () -> Unit = {}) {
 
             !showCart && sellable.isEmpty() -> EmptyState(
                 title = "No products on this device",
-                message = "The till sells from its local catalogue. Refresh the catalogue in Setup so it is available here, even offline.",
+                message = "The till sells from its own copy of the catalogue. Sync once to pull it down — after that it is here even with no connection at all.",
                 icon = Icons.Filled.Inventory2,
                 actionLabel = "Open catalogue",
                 onAction = onOpenCatalogue,

@@ -14,6 +14,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ErrorOutline
+import androidx.compose.material.icons.filled.Inventory2
 import androidx.compose.material.icons.filled.PointOfSale
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Card
@@ -33,6 +34,7 @@ import com.kiosk.erp.core.database.SaleEntity
 import com.kiosk.erp.core.designsystem.Banner
 import com.kiosk.erp.core.designsystem.DetailRow
 import com.kiosk.erp.core.designsystem.EmptyState
+import com.kiosk.erp.core.designsystem.NavRow
 import com.kiosk.erp.core.designsystem.Pill
 import com.kiosk.erp.core.designsystem.ScreenHeader
 import com.kiosk.erp.core.designsystem.SectionTitle
@@ -47,6 +49,7 @@ fun DashboardScreen(
     onOpenPos: () -> Unit = {},
     onOpenSync: () -> Unit = {},
     onOpenSetup: () -> Unit = {},
+    onOpenCatalogue: () -> Unit = {},
 ) {
     val accepted by vm.acceptedTotalMinor.collectAsState()
     val pendingTotal by vm.pendingTotalMinor.collectAsState()
@@ -138,6 +141,17 @@ fun DashboardScreen(
                     }
                 }
             }
+        }
+
+        // What this till sells is a daily question, not a settings task — so the catalogue gets a
+        // door of its own here instead of living only behind Setup.
+        item {
+            NavRow(
+                title = "Products",
+                subtitle = "Browse and edit the catalogue this device sells from",
+                icon = Icons.Filled.Inventory2,
+                onClick = onOpenCatalogue,
+            )
         }
 
         item {

@@ -272,9 +272,26 @@ class ApiClient {
         PullPage(events = events, cursor = response["cursor"]?.jsonPrimitive?.content?.toLongOrNull() ?: cursor, hasMore = false)
     }
 
+    /**
+     * The whole catalogue, walked page by page.
+     *
+     * One request capped at the server's 500-row maximum silently truncated anything beyond it, so a
+     * shop's first 500 SKUs were the only ones a till could ever scan. The loop stops on a short page
+     * (the server's contract for "no more rows") and on an explicit ceiling, so a pathological
+     * response can never spin.
+     */
     suspend fun serverProducts(baseUrl: String, token: String): List<ServerProduct> = withContext(Dispatchers.IO) {
-        val response = get(baseUrl, "products?limit=500", token).jsonObject
-        response["products"]?.jsonArray?.map { it.jsonObject.toServerProduct() } ?: emptyList()
+        val pageSize = 500
+        val all = mutableListOf<ServerProduct>()
+        var offset = 0
+        while (offset < 20_000) {
+            val response = get(baseUrl, "products?limit=$pageSize&offset=$offset", token).jsonObject
+            val page = response["products"]?.jsonArray?.map { it.jsonObject.toServerProduct() } ?: emptyList()
+            all += page
+            if (page.size < pageSize) break
+            offset += pageSize
+        }
+        all
     }
 
     /**
