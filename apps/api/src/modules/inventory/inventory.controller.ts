@@ -1,10 +1,27 @@
-import { Controller, Get, Query } from '@nestjs/common';
-import { AuthContext, CurrentAuth } from '../../common/auth-context';
+import { Body, Controller, Get, Post, Query, Req } from '@nestjs/common';
+import { AuthContext, AuthedRequest, CurrentAuth, RequirePermissions } from '../../common/auth-context';
 import { InventoryService } from './inventory.service';
+import { OpeningStockImportSchema } from './inventory.schema';
 
 @Controller('inventory')
 export class InventoryController {
   constructor(private readonly inventory: InventoryService) {}
+
+  /**
+   * Opening-stock import (item 4.5). The permission is `inventory.receive` — the same one that lets
+   * you post a stock receipt, because opening stock IS a receipt that happens to be typed from a
+   * spreadsheet instead of a supplier's note.
+   *
+   * `commit = false` is a pure preview: the server validates every row and writes nothing, so the
+   * operator approves exactly what a commit will do. A file with any bad row answers with the report
+   * rather than an error status — the report is the resource they asked for.
+   */
+  @Post('opening-stock/import')
+  @RequirePermissions('inventory.receive')
+  async importOpeningStock(@CurrentAuth() ctx: AuthContext, @Req() req: AuthedRequest, @Body() body: unknown) {
+    const input = OpeningStockImportSchema.parse(body);
+    return this.inventory.importOpeningStock(ctx.tenantId, ctx.userId, ctx.deviceId, req.correlationId, input);
+  }
 
   @Get('balances')
   async balances(

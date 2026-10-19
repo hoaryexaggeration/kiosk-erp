@@ -91,3 +91,64 @@ export function parseCsv(text: string): CsvRow[] {
   // Drop blank lines (a trailing newline, or spreadsheet padding) without disturbing line numbers.
   return rows.filter((row) => row.cells.some((value) => value.trim().length > 0));
 }
+
+/** Canonical column name -> the header spellings accepted for it, for one import vocabulary. */
+export type ColumnAliases = Record<string, string[]>;
+
+/**
+ * Resolve a header cell to a canonical column, or null when it is not one of ours. Normalisation is
+ * deliberately narrow (case, spaces and hyphens): a column the file uses that we do not recognise is
+ * a typo the operator must be told about, never a value to silently drop.
+ */
+export function canonicalColumn(header: string, aliases: ColumnAliases): string | null {
+  const normalised = header.trim().toLowerCase().replace(/[\s-]+/g, '_');
+  if (normalised.length === 0) return null;
+  for (const [canonical, spellings] of Object.entries(aliases)) {
+    if (canonical === normalised || spellings.includes(normalised)) return canonical;
+  }
+  return null;
+}
+
+function stringifyValue(value: unknown): string {
+  if (value === null || value === undefined) return '';
+  if (Array.isArray(value)) return value.map(stringifyValue).filter((item) => item.length > 0).join('|');
+  if (typeof value === 'boolean') return value ? 'yes' : 'no';
+  return String(value);
+}
+
+/**
+ * JSON records -> the same `CsvRow[]` the equivalent file would parse to, using one vocabulary of
+ * column aliases. That is what lets a single planner and a single error report serve both formats:
+ * whatever preview and commit do for a CSV file, they do identically for JSON.
+ *
+ * Projected rows start at line 2 so an error report points at the position the operator sees in
+ * their array, matching the way CSV line numbers work.
+ */
+export function recordsToCsvRows(records: unknown[], aliases: ColumnAliases): CsvRow[] {
+  const canonicalOrder = Object.keys(aliases);
+  const seenCanonical = new Set<string>();
+  const unknownColumns: string[] = [];
+  const projected: { line: number; values: Map<string, string> }[] = [];
+
+  records.forEach((record, position) => {
+    if (record === null || typeof record !== 'object' || Array.isArray(record)) return;
+    const values = new Map<string, string>();
+    for (const [key, value] of Object.entries(record as Record<string, unknown>)) {
+      const canonical = canonicalColumn(key, aliases);
+      const cell = canonical ?? key.trim();
+      if (canonical) {
+        seenCanonical.add(canonical);
+      } else if (cell.length > 0 && !unknownColumns.includes(cell)) {
+        unknownColumns.push(cell);
+      }
+      if (!values.has(cell)) values.set(cell, stringifyValue(value));
+    }
+    projected.push({ line: position + 2, values });
+  });
+
+  const columns = [...canonicalOrder.filter((column) => seenCanonical.has(column)), ...unknownColumns];
+  return [
+    { line: 1, cells: columns },
+    ...projected.map((row) => ({ line: row.line, cells: columns.map((column) => row.values.get(column) ?? '') })),
+  ];
+}

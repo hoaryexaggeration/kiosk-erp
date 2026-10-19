@@ -161,7 +161,7 @@ each later phase is expanded to the same granularity as it becomes current.
 | 4.2 ✔ | Product management UI: list/search, create, edit, deactivate; barcodes, category, tax category, unit, cost, price | Done: `feature:catalog` list + editor + barcode set editing; Room v3 adds description/category/taxCategory/active |
 | 4.3 ✔ | Category + tax-category management UI | Done: "Categories & tax" screen in `feature:catalog`; rate entered as a percentage, stored exactly in basis points |
 | 4.4 ✔ | Bulk import: CSV/JSON upload → **preview → validation → per-row error report → commit** (D2) | Done: `POST /v1/products/import` (preview/commit share one planner, all-or-nothing) + device file picker with the server-validated preview; 18 unit + 8 endpoint tests |
-| 4.5 | Opening stock import (D3) | Opening balances arrive as stock movements, never as a direct quantity edit |
+| 4.5 ✔ | Opening stock import (D3) | Done: `POST /v1/inventory/opening-stock/import` — preview/commit share one pure planner, all-or-nothing, report carries `onHandBefore/After` + three warnings; commit appends `opening_stock` movements that open FIFO layers; `requestId` makes a retried commit idempotent; Stock tab gains an Opening stock screen (file picker or typed lines); 16 unit + 11 endpoint tests |
 | 4.6 | Units of measure + conversions (D4) | Buying in crates and selling in pieces keeps one stock ledger |
 | 4.7 | Cross-branch stock transfers with dispatch/receipt/discrepancy states (D6, ADR 0008) | Stock is in exactly one branch or in transit, never both |
 | 4.8 | Stocktake / cycle count (D7) | A count produces adjustment movements with reason and actor |
@@ -211,7 +211,7 @@ using.
   state conveyed by colour alone, error text never truncated.
 
 Still to do when its phase arrives: cashier session and role gate (5.2), oversell block (5.2a),
-weight/decimal quantity entry (5.3), sales history screen (5.11), opening-stock import (4.5).
+weight/decimal quantity entry (5.3), sales history screen (5.11).
 
 #### Scan-to-add + demo catalogue (v0.4.4, still between 4.4 and 4.5)
 
@@ -238,6 +238,33 @@ seed a catalogue worth testing against*. Three findings came out of tracing the 
   stock, one not stock-tracked and one deactivated. Documented row by row in
   `docs/operations/demo-catalogue.md`; still idempotent, and the two original barcodes that the test
   suite pins are untouched.
+
+#### Opening-stock import (v0.4.5, item 4.5)
+
+The exit criterion is the design: **an opening balance is a movement, never an edit to a quantity.**
+`POST /v1/inventory/opening-stock/import` (permission `inventory.receive`) plans the whole file with
+a pure function before the transaction opens, then appends one movement per line (`reason: 'opening'`,
+`source_type: 'opening_stock'`) which also opens the FIFO layer that values that stock from day one.
+`stock_balances` stays a projection — the test that pins this asserts the stored quantity equals the
+sum of its movements, so there is no code path in the import that writes a quantity.
+
+- **One planner for CSV, JSON, preview and commit**, so what the operator approves is exactly what
+  runs. An invalid file answers with the report and writes nothing; a preview does not even create
+  the branch's stock location.
+- **The preview is a before/after, not a number**: `onHandBefore → onHandAfter` per line, plus totals
+  in units and shillings, and per-line unit cost and value. Three warnings inform without blocking —
+  opening stock already present for that product, a cost that is unknown (so the line would be valued
+  at 0), and a branch that has already traded.
+- **Retries cannot double-count.** The device mints one `requestId` per file chosen; it becomes each
+  movement's `source_id` and `command_id`, so a commit that times out and is retried reports
+  `alreadyApplied: true` instead of opening a second lot of stock. The ledger's own unique index on
+  `(tenant, command, product, source)` is the backstop if two identical commits ever race.
+- **A cost stated in the file** updates `products.cost_minor` (it is only ever the latest known
+  purchase cost); an omitted cost never rewrites what the buyer already recorded.
+- **Screen**: Stock → *Opening stock* → choose a CSV/JSON file **or** type the lines → report →
+  *Import N line(s)*. On success the balances are refetched so the Stock list shows the new on-hand,
+  and a replayed commit says *already imported* rather than *imported*.
+- Documented in `docs/operations/opening-stock-import.md`; 16 planner unit tests + 11 endpoint tests.
 
 ### Phase 5 — Offline POS vertical slice (current phase)
 

@@ -88,8 +88,8 @@ A barcode that already belongs to a *different* product is an error, never a sil
 `line` is the line number in the file as the operator sees it in a spreadsheet, so an error report can
 be read side by side with the file.
 
-A file with errors answers **200**, not an error status: a preview that found problems is a successful
-preview. `invalid` means "nothing was written".
+A file with errors answers **with the report**, not an error status: a preview that found problems is a
+successful preview. `invalid` means "nothing was written".
 
 Error codes: `EMPTY_FILE`, `MISSING_COLUMN`, `UNKNOWN_COLUMN`, `DUPLICATE_COLUMN`, `TOO_MANY_ROWS`,
 `RAGGED_ROW`, `MISSING_SKU`, `INVALID_SKU`, `MISSING_NAME`, `INVALID_NAME`, `INVALID_DESCRIPTION`,

@@ -90,7 +90,7 @@ export class CatalogController {
   }
 
   /**
-   * Bulk catalogue import (item 4.4). A rejected file answers 200 with the per-row error report rather
+   * Bulk catalogue import (item 4.4). A rejected file answers with the per-row error report rather
    * than an error status: the report IS the resource the operator asked for, and a preview that found
    * problems is a successful preview, not a failed request. Nothing is written unless `commit` is true
    * AND every row is valid.

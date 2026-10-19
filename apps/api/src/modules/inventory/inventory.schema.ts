@@ -45,3 +45,26 @@ export const StockAdjustmentSchema = z.object({
   }),
 });
 export type StockAdjustmentPayload = z.infer<typeof StockAdjustmentSchema>;
+
+/**
+ * Opening-stock import (item 4.5). `csv` or `records` (not both); `commit: false` is a pure preview
+ * and a file with any bad row is reported, never partially applied.
+ *
+ * `branchId` is required because this is a management call made by an enrolled device rather than a
+ * sync command that carries its own branch. `requestId` is the idempotency key the operator's one
+ * tap is retried under: it becomes the movement's `source_id`, so a timed-out commit that is retried
+ * is recognised instead of applying the same opening stock twice — which the ledger's own unique
+ * index would otherwise have to refuse.
+ */
+export const OpeningStockImportSchema = z
+  .object({
+    branchId: z.string().uuid(),
+    requestId: z.string().uuid(),
+    csv: z.string().max(5_000_000).optional(),
+    records: z.array(z.unknown()).max(5000).optional(),
+    commit: z.boolean().default(false),
+  })
+  .refine((value) => (value.csv === undefined) !== (value.records === undefined), {
+    message: 'Provide exactly one of csv or records',
+  });
+export type OpeningStockImportInput = z.infer<typeof OpeningStockImportSchema>;

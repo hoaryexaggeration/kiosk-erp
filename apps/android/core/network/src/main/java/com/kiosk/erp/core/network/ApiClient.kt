@@ -127,8 +127,9 @@ data class ImportPreviewRow(
 )
 
 /**
- * The result of a bulk import. A file with errors answers 200 with this report: a preview that found
- * problems is a successful preview, not a failed request. `invalid` means nothing was written.
+ * The result of a bulk import. A file with errors answers with this report rather than an error
+ * status: a preview that found problems is a successful preview, not a failed request. `invalid`
+ * means nothing was written.
  */
 data class ImportReport(
     val status: String,
@@ -143,6 +144,55 @@ data class ImportReport(
     val previewTruncated: Boolean = false,
 ) {
     val isValid: Boolean get() = errorCount == 0
+}
+
+/**
+ * One advisory from the opening-stock planner. A warning never blocks an import — the operator
+ * decides — but it is always shown before the commit is offered, because it is telling them
+ * something they cannot see from the file alone (existing opening stock, a branch that has traded).
+ */
+data class OpeningStockWarning(
+    val line: Int,
+    val sku: String?,
+    val field: String?,
+    val code: String,
+    val message: String,
+)
+
+/** One planned line: what is on hand now, what this line adds, and what it will be worth. */
+data class OpeningStockPreviewRow(
+    val line: Int,
+    val sku: String,
+    val name: String,
+    val unit: String,
+    val quantity: Double,
+    val onHandBefore: Double,
+    val onHandAfter: Double,
+    val unitCostMinor: Long,
+    val valueMinor: Long,
+    val costWasGiven: Boolean,
+)
+
+/**
+ * The result of an opening-stock import. `invalid` means nothing was written; `alreadyApplied`
+ * means a retried commit found its own movements and left them alone, so the operator is not told
+ * twice that a fresh import succeeded.
+ */
+data class OpeningStockReport(
+    val status: String,
+    val alreadyApplied: Boolean,
+    val rowCount: Int,
+    val validCount: Int,
+    val errorCount: Int,
+    val warningCount: Int,
+    val totalQuantity: Double,
+    val totalValueMinor: Long,
+    val errors: List<ImportRowError> = emptyList(),
+    val warnings: List<OpeningStockWarning> = emptyList(),
+    val preview: List<OpeningStockPreviewRow> = emptyList(),
+    val previewTruncated: Boolean = false,
+) {
+    val isValid: Boolean get() = errorCount == 0 && validCount > 0
 }
 
 /**
@@ -441,6 +491,33 @@ class ApiClient {
         post(baseUrl, "products/import", token, body).jsonObject.toImportReport()
     }
 
+    /**
+     * Opening-stock import (item 4.5). `commit = false` is a pure preview: the server validates
+     * every row and writes nothing, so what is approved on screen is exactly what a commit does.
+     *
+     * `requestId` is generated once per file chosen and reused for the commit, which is what lets a
+     * commit that times out be retried without opening the same stock a second time.
+     */
+    suspend fun importOpeningStock(
+        baseUrl: String,
+        token: String,
+        branchId: String,
+        requestId: String,
+        source: ImportSource,
+        commit: Boolean,
+    ): OpeningStockReport = withContext(Dispatchers.IO) {
+        val body = buildJsonObject {
+            put("branchId", branchId)
+            put("requestId", requestId)
+            when (source) {
+                is ImportSource.Csv -> put("csv", source.text)
+                is ImportSource.Json -> put("records", recordsOf(source.text))
+            }
+            put("commit", commit)
+        }
+        post(baseUrl, "inventory/opening-stock/import", token, body).jsonObject.toOpeningStockReport()
+    }
+
     /** A JSON file is either an array of records or an object wrapping one in `records`. */
     private fun recordsOf(text: String): JsonArray {
         val element = runCatching { json.parseToJsonElement(text) }.getOrNull()
@@ -479,6 +556,53 @@ class ApiClient {
                 name = row["name"]?.jsonPrimitive?.content ?: "",
                 priceMinor = row["priceMinor"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0L,
                 unit = row["unit"]?.jsonPrimitive?.content ?: "",
+            )
+        } ?: emptyList(),
+        previewTruncated = this["previewTruncated"]?.jsonPrimitive?.content?.toBooleanStrictOrNull() ?: false,
+    )
+
+    private fun JsonObject.toOpeningStockReport(): OpeningStockReport = OpeningStockReport(
+        status = this["status"]?.jsonPrimitive?.content ?: "invalid",
+        alreadyApplied = this["alreadyApplied"]?.jsonPrimitive?.content?.toBooleanStrictOrNull() ?: false,
+        rowCount = this["rowCount"]?.jsonPrimitive?.content?.toIntOrNull() ?: 0,
+        validCount = this["validCount"]?.jsonPrimitive?.content?.toIntOrNull() ?: 0,
+        errorCount = this["errorCount"]?.jsonPrimitive?.content?.toIntOrNull() ?: 0,
+        warningCount = this["warningCount"]?.jsonPrimitive?.content?.toIntOrNull() ?: 0,
+        totalQuantity = this["totalQuantity"]?.jsonPrimitive?.content?.toDoubleOrNull() ?: 0.0,
+        totalValueMinor = this["totalValueMinor"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0L,
+        errors = this["errors"]?.jsonArray?.map { element ->
+            val error = element.jsonObject
+            ImportRowError(
+                line = error["line"]?.jsonPrimitive?.content?.toIntOrNull() ?: 0,
+                sku = error["sku"]?.jsonPrimitive?.contentOrNull,
+                field = error["field"]?.jsonPrimitive?.contentOrNull,
+                code = error["code"]?.jsonPrimitive?.content ?: "",
+                message = error["message"]?.jsonPrimitive?.content ?: "",
+            )
+        } ?: emptyList(),
+        warnings = this["warnings"]?.jsonArray?.map { element ->
+            val warning = element.jsonObject
+            OpeningStockWarning(
+                line = warning["line"]?.jsonPrimitive?.content?.toIntOrNull() ?: 0,
+                sku = warning["sku"]?.jsonPrimitive?.contentOrNull,
+                field = warning["field"]?.jsonPrimitive?.contentOrNull,
+                code = warning["code"]?.jsonPrimitive?.content ?: "",
+                message = warning["message"]?.jsonPrimitive?.content ?: "",
+            )
+        } ?: emptyList(),
+        preview = this["preview"]?.jsonArray?.map { element ->
+            val row = element.jsonObject
+            OpeningStockPreviewRow(
+                line = row["line"]?.jsonPrimitive?.content?.toIntOrNull() ?: 0,
+                sku = row["sku"]?.jsonPrimitive?.content ?: "",
+                name = row["name"]?.jsonPrimitive?.content ?: "",
+                unit = row["unit"]?.jsonPrimitive?.content ?: "",
+                quantity = row["quantity"]?.jsonPrimitive?.content?.toDoubleOrNull() ?: 0.0,
+                onHandBefore = row["onHandBefore"]?.jsonPrimitive?.content?.toDoubleOrNull() ?: 0.0,
+                onHandAfter = row["onHandAfter"]?.jsonPrimitive?.content?.toDoubleOrNull() ?: 0.0,
+                unitCostMinor = row["unitCostMinor"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0L,
+                valueMinor = row["valueMinor"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0L,
+                costWasGiven = row["costWasGiven"]?.jsonPrimitive?.content?.toBooleanStrictOrNull() ?: false,
             )
         } ?: emptyList(),
         previewTruncated = this["previewTruncated"]?.jsonPrimitive?.content?.toBooleanStrictOrNull() ?: false,

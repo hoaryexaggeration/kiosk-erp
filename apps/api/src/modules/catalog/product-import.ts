@@ -10,7 +10,7 @@
  * Nothing here touches the database, so it is directly unit-testable.
  */
 import { parseMinorInput } from '../../domain/pricing';
-import { CsvRow } from '../../domain/csv';
+import { CsvRow, canonicalColumn as canonicalHeader, recordsToCsvRows as recordsToRows } from '../../domain/csv';
 
 /** Canonical column -> the header spellings we accept. A typo must fail loudly, not import zeros. */
 const COLUMN_ALIASES: Record<string, string[]> = {
@@ -26,6 +26,8 @@ const COLUMN_ALIASES: Record<string, string[]> = {
   stock_tracked: ['stock_tracked', 'track_stock', 'tracks_stock', 'tracked'],
   active: ['active', 'is_active', 'enabled'],
 };
+
+const canonicalColumn = (header: string): string | null => canonicalHeader(header, COLUMN_ALIASES);
 
 const REQUIRED_COLUMNS = ['sku', 'name', 'price'];
 
@@ -91,22 +93,6 @@ export interface ImportOptions {
   createMissingCategories: boolean;
 }
 
-function canonicalColumn(header: string): string | null {
-  const normalised = header.trim().toLowerCase().replace(/[\s-]+/g, '_');
-  if (normalised.length === 0) return null;
-  for (const [canonical, aliases] of Object.entries(COLUMN_ALIASES)) {
-    if (aliases.includes(normalised) || canonical === normalised) return canonical;
-  }
-  return null;
-}
-
-function stringifyValue(value: unknown): string {
-  if (value === null || value === undefined) return '';
-  if (Array.isArray(value)) return value.map(stringifyValue).filter((item) => item.length > 0).join('|');
-  if (typeof value === 'boolean') return value ? 'yes' : 'no';
-  return String(value);
-}
-
 /**
  * JSON imports use the same column vocabulary as CSV, so one planner and one error report serve both
  * formats. Values may be strings, numbers, booleans or arrays (barcodes, joined with `|`).
@@ -115,32 +101,7 @@ function stringifyValue(value: unknown): string {
  * reported as an unknown column rather than being silently read as 6500 shillings.
  */
 export function recordsToCsvRows(records: unknown[]): CsvRow[] {
-  const canonicalOrder = Object.keys(COLUMN_ALIASES);
-  const seenCanonical = new Set<string>();
-  const unknownColumns: string[] = [];
-  const projected: { line: number; values: Map<string, string> }[] = [];
-
-  records.forEach((record, position) => {
-    if (record === null || typeof record !== 'object' || Array.isArray(record)) return;
-    const values = new Map<string, string>();
-    for (const [key, value] of Object.entries(record as Record<string, unknown>)) {
-      const canonical = canonicalColumn(key);
-      const cell = canonical ?? key.trim();
-      if (canonical) {
-        seenCanonical.add(canonical);
-      } else if (cell.length > 0 && !unknownColumns.includes(cell)) {
-        unknownColumns.push(cell);
-      }
-      if (!values.has(cell)) values.set(cell, stringifyValue(value));
-    }
-    projected.push({ line: position + 2, values });
-  });
-
-  const columns = [...canonicalOrder.filter((column) => seenCanonical.has(column)), ...unknownColumns];
-  return [
-    { line: 1, cells: columns },
-    ...projected.map((row) => ({ line: row.line, cells: columns.map((column) => row.values.get(column) ?? '') })),
-  ];
+  return recordsToRows(records, COLUMN_ALIASES);
 }
 
 /** true / false / yes / no / 1 / 0 — anything else is rejected rather than guessed at. */

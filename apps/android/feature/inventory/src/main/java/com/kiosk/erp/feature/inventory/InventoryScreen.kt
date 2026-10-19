@@ -1,5 +1,10 @@
 package com.kiosk.erp.feature.inventory
 
+import android.content.Context
+import android.net.Uri
+import android.provider.OpenableColumns
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -10,16 +15,22 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Inventory2
+import androidx.compose.material.icons.filled.PostAdd
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.UploadFile
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -33,10 +44,12 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -48,14 +61,23 @@ import com.kiosk.erp.core.database.ProductEntity
 import com.kiosk.erp.core.designsystem.Banner
 import com.kiosk.erp.core.designsystem.DetailRow
 import com.kiosk.erp.core.designsystem.EmptyState
+import com.kiosk.erp.core.designsystem.FieldLabel
 import com.kiosk.erp.core.designsystem.Hint
 import com.kiosk.erp.core.designsystem.LoadingState
+import com.kiosk.erp.core.designsystem.NavRow
 import com.kiosk.erp.core.designsystem.Pill
 import com.kiosk.erp.core.designsystem.ScreenHeader
 import com.kiosk.erp.core.designsystem.ScreenPadding
+import com.kiosk.erp.core.designsystem.SectionTitle
 import com.kiosk.erp.core.designsystem.StackGap
+import com.kiosk.erp.core.designsystem.StatTile
 import com.kiosk.erp.core.designsystem.Tone
+import com.kiosk.erp.core.network.OpeningStockPreviewRow
+import com.kiosk.erp.core.network.OpeningStockReport
 import com.kiosk.erp.core.network.ServerMovement
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * Stock on this device.
@@ -66,9 +88,29 @@ import com.kiosk.erp.core.network.ServerMovement
  */
 @Composable
 fun InventoryScreen(vm: InventoryViewModel, onOpenCatalogue: () -> Unit = {}) {
+    // Registered before any early return so the picker exists whichever screen is on top.
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            scope.launch {
+                val text = withContext(Dispatchers.IO) {
+                    runCatching { context.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() } }.getOrNull()
+                }
+                if (text == null) vm.openingReadFailed() else vm.analyseOpeningFile(displayName(context, uri), text)
+            }
+        }
+    }
+
     val history = vm.history.collectAsState().value
     if (history != null) {
         MovementHistoryScreen(history = history, vm = vm)
+        return
+    }
+
+    val opening = vm.openingImport.collectAsState().value
+    if (opening != null) {
+        OpeningStockScreen(state = opening, vm = vm, onPickFile = { filePicker.launch(OPENING_MIME_TYPES) })
         return
     }
 
@@ -114,6 +156,14 @@ fun InventoryScreen(vm: InventoryViewModel, onOpenCatalogue: () -> Unit = {}) {
                 onDismiss = vm::clearMessage,
             )
         }
+
+        Spacer(Modifier.height(StackGap))
+        NavRow(
+            title = "Opening stock",
+            subtitle = "Import opening balances for this branch — checked in full first, posted as movements, all or nothing",
+            icon = Icons.Filled.PostAdd,
+            onClick = vm::openOpeningImport,
+        )
 
         Spacer(Modifier.height(StackGap))
         OutlinedTextField(
@@ -383,4 +433,221 @@ private fun formatWhen(iso: String): String {
             .atZoneSameInstant(java.time.ZoneId.systemDefault())
             .format(java.time.format.DateTimeFormatter.ofPattern("dd MMM yyyy HH:mm"))
     }.getOrDefault(iso)
+}
+
+// --- opening-stock import (item 4.5) -----------------------------------------------------------------
+
+/** Most CSV files arrive as `text/csv`; JSON is accepted too, via the same column vocabulary. */
+private val OPENING_MIME_TYPES = arrayOf("text/*", "application/json", "application/vnd.ms-excel")
+
+/** One report issue per line is plenty to act on; the count after it covers the rest. */
+private const val MAX_REPORT_ISSUES = 20
+
+private fun displayName(context: Context, uri: Uri): String = runCatching {
+    context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+        if (cursor.moveToFirst()) cursor.getString(0) else null
+    }
+}.getOrNull() ?: uri.lastPathSegment ?: "import"
+
+/** `line 4, SKU-003 — the words an operator needs, in the order they need them. */
+private fun issueLabel(line: Int, sku: String?, message: String): String =
+    "line $line${sku?.takeIf { it.isNotBlank() }?.let { ", $it" } ?: ""} — $message"
+
+/**
+ * Opening stock: pick a file or type the lines, then read what the server says every line will do
+ * before any of it is written.
+ *
+ * Nothing on this screen can set a quantity. The report is a list of movements that will be
+ * APPENDED, each showing the balance before and after — so the operator approves an event that
+ * happened on a date, not an edit to a stored number (item 4.5's exit criterion).
+ */
+@Composable
+private fun OpeningStockScreen(
+    state: OpeningImportState,
+    vm: InventoryViewModel,
+    onPickFile: () -> Unit,
+) {
+    val report = state.report
+    Column(Modifier.fillMaxSize().padding(ScreenPadding).verticalScroll(rememberScrollState())) {
+        ScreenHeader(
+            title = "Opening stock",
+            subtitle = "Opening balances are posted as movements, all or nothing — never as an edit to a quantity",
+            onBack = vm::closeOpeningImport,
+        )
+        Spacer(Modifier.height(StackGap))
+
+        if (state.source == null) {
+            Hint(
+                "Columns: sku, quantity, unit_cost. unit_cost is optional — leave it out to use the cost " +
+                    "already on the product. The whole file is checked first, and one bad row writes nothing.",
+            )
+            Spacer(Modifier.height(StackGap))
+            OutlinedButton(onClick = onPickFile, modifier = Modifier.fillMaxWidth().heightIn(min = 46.dp)) {
+                Icon(Icons.Filled.UploadFile, contentDescription = null)
+                Spacer(Modifier.width(8.dp))
+                Text("Choose a CSV or JSON file")
+            }
+            Spacer(Modifier.height(StackGap))
+            FieldLabel("Or type the lines")
+            OutlinedTextField(
+                value = state.typedText,
+                onValueChange = vm::setOpeningTypedText,
+                placeholder = { Text("SKU-003,40\nSKU-004,24,265") },
+                minLines = 4,
+                maxLines = 8,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text),
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Spacer(Modifier.height(StackGap))
+            OutlinedButton(
+                onClick = vm::analyseOpeningTyped,
+                enabled = !state.analysing,
+                modifier = Modifier.fillMaxWidth().heightIn(min = 46.dp),
+            ) {
+                Text(if (state.analysing) "Checking every line…" else "Preview typed lines")
+            }
+        }
+
+        state.error?.let { error ->
+            Spacer(Modifier.height(StackGap))
+            Banner(message = error, tone = Tone.Error, onDismiss = vm::clearOpeningError)
+        }
+
+        if (state.analysing) {
+            Spacer(Modifier.height(StackGap))
+            LoadingState("The server is checking every line against the catalogue and current stock…")
+        }
+
+        report?.let { OpeningReport(state = state, report = it, vm = vm) }
+    }
+}
+
+/** The server's answer: what is ready, what blocks it, what it is worth, and what it changes. */
+@Composable
+private fun OpeningReport(state: OpeningImportState, report: OpeningStockReport, vm: InventoryViewModel) {
+    val ready = report.isValid
+
+    Spacer(Modifier.height(StackGap))
+    SectionTitle(
+        if (state.fileName.isBlank()) "Report" else "Report for ${state.fileName}",
+        caption = if (ready) "Nothing has been written yet — the import happens when you confirm it below."
+        else "Nothing has been written.",
+    )
+    Spacer(Modifier.height(StackGap))
+    Pill(
+        text = when {
+            !ready -> "${report.errorCount} problem(s)"
+            report.warningCount > 0 -> "Ready to import — ${report.warningCount} warning(s)"
+            else -> "Ready to import"
+        },
+        tone = if (!ready) Tone.Error else if (report.warningCount > 0) Tone.Warning else Tone.Success,
+    )
+    Spacer(Modifier.height(StackGap))
+    Row(horizontalArrangement = Arrangement.spacedBy(StackGap), modifier = Modifier.fillMaxWidth()) {
+        StatTile("Lines", report.validCount.toString(), caption = "of ${report.rowCount}", modifier = Modifier.weight(1f))
+        StatTile("Units", formatQuantity(report.totalQuantity), modifier = Modifier.weight(1f))
+        StatTile("Value", Pricing.formatMinor(report.totalValueMinor), caption = "KES", modifier = Modifier.weight(1f))
+    }
+
+    if (report.warnings.isNotEmpty()) {
+        Spacer(Modifier.height(StackGap))
+        SectionTitle("Check these first", caption = "A warning does not stop the import — you decide.")
+        Spacer(Modifier.height(StackGap))
+        report.warnings.take(MAX_REPORT_ISSUES).forEach { warning ->
+            Banner(message = issueLabel(warning.line, warning.sku, warning.message), tone = Tone.Warning)
+            Spacer(Modifier.height(6.dp))
+        }
+        if (report.warnings.size > MAX_REPORT_ISSUES) {
+            Hint("…and ${report.warnings.size - MAX_REPORT_ISSUES} more warning(s).")
+        }
+    }
+
+    if (report.errors.isNotEmpty()) {
+        Spacer(Modifier.height(StackGap))
+        SectionTitle("Problems", caption = "One problem row means none of the file is written.")
+        Spacer(Modifier.height(StackGap))
+        report.errors.take(MAX_REPORT_ISSUES).forEach { error ->
+            Banner(message = issueLabel(error.line, error.sku, error.message), tone = Tone.Error)
+            Spacer(Modifier.height(6.dp))
+        }
+        if (report.errors.size > MAX_REPORT_ISSUES) {
+            Hint("…and ${report.errors.size - MAX_REPORT_ISSUES} more problem(s).")
+        }
+    }
+
+    if (report.preview.isNotEmpty()) {
+        Spacer(Modifier.height(StackGap))
+        SectionTitle(
+            "Lines to be posted",
+            caption = if (report.previewTruncated) "first ${report.preview.size} of ${report.validCount}" else null,
+        )
+        Spacer(Modifier.height(StackGap))
+        report.preview.forEach { row ->
+            OpeningRow(row)
+            Spacer(Modifier.height(StackGap))
+        }
+        if (report.previewTruncated) {
+            Hint("…and ${report.validCount - report.preview.size} more lines. All of them are checked and all of them post.")
+        }
+    }
+
+    Spacer(Modifier.height(StackGap))
+    Button(
+        onClick = vm::commitOpeningImport,
+        enabled = ready && !state.committing,
+        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+    ) {
+        Text(
+            if (state.committing) "Importing…"
+            else "Import ${report.validCount} line(s)" +
+                if (report.warningCount > 0) " — ${report.warningCount} warning(s)" else "",
+        )
+    }
+    Spacer(Modifier.height(StackGap))
+    OutlinedButton(onClick = vm::closeOpeningImport, modifier = Modifier.fillMaxWidth().heightIn(min = 46.dp)) {
+        Text("Back to Stock")
+    }
+}
+
+/** One planned movement: quantity in, balance before → after, and what it will be worth. */
+@Composable
+private fun OpeningRow(row: OpeningStockPreviewRow) {
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(12.dp)) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    "${row.sku} · ${row.name}",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+                Text(
+                    formatQuantity(row.quantity),
+                    fontFamily = FontFamily.Monospace,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                )
+            }
+            Spacer(Modifier.height(4.dp))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Text(
+                    "on hand ${formatQuantity(row.onHandBefore)} → ${formatQuantity(row.onHandAfter)}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(
+                    "${Pricing.formatMinor(row.valueMinor)} KES",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Text(
+                "line ${row.line} · ${row.unit}" + if (row.costWasGiven) "" else " · cost taken from the product",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
 }

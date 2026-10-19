@@ -3,7 +3,16 @@ import { Kysely, sql } from 'kysely';
 import { Database } from '../../db/database';
 import { DbService } from '../../db/db.service';
 import { EventsService } from '../platform/events.service';
-import { StockAdjustmentPayload, StockReceiptPayload } from './inventory.schema';
+import { OpeningStockImportInput, StockAdjustmentPayload, StockReceiptPayload } from './inventory.schema';
+import { AppError } from '../../common/errors';
+import { parseCsv } from '../../domain/csv';
+import {
+  OpeningStockIssue,
+  OpeningStockProduct,
+  OpeningStockReference,
+  planOpeningStockImport,
+  recordsToCsvRows,
+} from './opening-stock-import';
 import { roundHalfUp } from '../../domain/pricing';
 
 export interface InventoryContext {
@@ -53,6 +62,44 @@ export interface ApplyResult {
 }
 
 const DEFAULT_LOCATION_NAME = 'Store';
+
+/** How many planned lines the report carries before it is truncated — enough to review, bounded. */
+const OPENING_PREVIEW_LIMIT = 100;
+
+/** One planned line as it goes back to the operator: the quantity that was and the quantity that will be. */
+export interface OpeningStockPreviewRow {
+  line: number;
+  sku: string;
+  name: string;
+  unit: string;
+  quantity: number;
+  onHandBefore: number;
+  onHandAfter: number;
+  unitCostMinor: number;
+  valueMinor: number;
+  costWasGiven: boolean;
+}
+
+/**
+ * The result of an opening-stock import. A file with errors answers with this report rather than an
+ * error status: a preview that found problems is a successful preview, not a failed request.
+ * `invalid` means nothing was written; `alreadyApplied` means a retried commit found its own
+ * movements and left them alone.
+ */
+export interface OpeningStockReport {
+  status: 'invalid' | 'validated' | 'committed';
+  alreadyApplied: boolean;
+  rowCount: number;
+  validCount: number;
+  errorCount: number;
+  warningCount: number;
+  totalQuantity: number;
+  totalValueMinor: number;
+  errors: OpeningStockIssue[];
+  warnings: OpeningStockIssue[];
+  previewTruncated: boolean;
+  preview: OpeningStockPreviewRow[];
+}
 
 /**
  * The single write path for on-hand stock. Movements are append-only facts; the balance table is a
@@ -367,6 +414,216 @@ export class InventoryService {
       status: reviewRequired ? ('review_required' as const) : ('accepted' as const),
       result: { adjustmentId: adjustment.id, serverSeq: seq, negative, uncosted },
       conflictCodes: reviewRequired ? ['NEGATIVE_STOCK'] : [],
+    };
+  }
+
+  /**
+   * Opening-stock import (item 4.5): a preview/commit pair over one pure planner.
+   *
+   * Opening balances arrive ONLY as movements. `applyMovement` appends a fact and the balance
+   * projection follows — nothing here can set a quantity — which is the exit criterion for this
+   * item: an opening balance is an event that happened on a date, it is auditable, and it opens the
+   * FIFO layers that value everything which later sells (ADR 0009).
+   *
+   * All-or-nothing: the plan is fully decided before the transaction opens, so an invalid file never
+   * reaches a write, and a failure inside the transaction rolls back every movement — a half-imported
+   * opening balance cannot exist.
+   */
+  async importOpeningStock(
+    tenantId: string,
+    actorId: string,
+    deviceId: string | undefined,
+    correlationId: string,
+    input: OpeningStockImportInput,
+  ): Promise<OpeningStockReport> {
+    // Another tenant's branch is a leak, not a row-level problem, so it fails the whole request.
+    const branch = await this.dbs.db
+      .selectFrom('branches')
+      .select('id')
+      .where('id', '=', input.branchId)
+      .where('tenant_id', '=', tenantId)
+      .executeTakeFirst();
+    if (!branch) throw AppError.notFound('UNKNOWN_BRANCH', 'That branch does not belong to this tenant');
+
+    // A preview must write nothing, so it never creates the stock location. Without a location there
+    // are no balances to read, and for a branch that is being opened "nothing recorded" IS zero —
+    // which is the truth rather than an approximation of it.
+    const locationId = await this.findLocation(tenantId, input.branchId);
+    const reference = await this.openingStockReference(tenantId, input.branchId, locationId);
+    const parsed = input.csv !== undefined ? parseCsv(input.csv) : recordsToCsvRows(input.records ?? []);
+    const plan = planOpeningStockImport(parsed, reference);
+
+    const report: OpeningStockReport = {
+      status: (plan.errors.length > 0 ? 'invalid' : input.commit ? 'committed' : 'validated') as OpeningStockReport['status'],
+      alreadyApplied: false,
+      rowCount: Math.max(parsed.length - 1, 0),
+      validCount: plan.rows.length,
+      errorCount: plan.errors.length,
+      warningCount: plan.warnings.length,
+      totalQuantity: plan.totalQuantity,
+      totalValueMinor: plan.totalValueMinor,
+      errors: plan.errors,
+      warnings: plan.warnings,
+      previewTruncated: plan.rows.length > OPENING_PREVIEW_LIMIT,
+      preview: plan.rows.slice(0, OPENING_PREVIEW_LIMIT).map((row) => ({
+        line: row.line,
+        sku: row.sku,
+        name: row.name,
+        unit: row.unit,
+        quantity: row.quantity,
+        onHandBefore: row.onHandBefore,
+        onHandAfter: row.onHandAfter,
+        unitCostMinor: row.unitCostMinor,
+        valueMinor: row.valueMinor,
+        costWasGiven: row.costWasGiven,
+      })),
+    };
+
+    // The guard above is the whole point: invalid or preview-only never reaches a write.
+    if (!input.commit || plan.errors.length > 0) return report;
+
+    // One file chosen once is one identity for both preview and commit, so a commit that timed out
+    // and is retried reports "already applied" instead of opening a second lot of stock. The ledger's
+    // own unique index on (tenant, command) is the backstop if two identical requests ever race.
+    const applied = await this.dbs.db
+      .selectFrom('inventory_movements')
+      .select('id')
+      .where('tenant_id', '=', tenantId)
+      .where('command_id', '=', input.requestId)
+      .executeTakeFirst();
+    if (applied) return { ...report, status: 'committed', alreadyApplied: true };
+
+    await this.dbs.transaction(async (trx) => {
+      // Only the write path creates the location; the preview resolved it read-only above.
+      const commitLocationId = locationId ?? (await this.getOrCreateLocation(trx, tenantId, input.branchId));
+
+      for (const row of plan.rows) {
+        await this.applyMovement(trx, {
+          tenantId,
+          branchId: input.branchId,
+          locationId: commitLocationId,
+          productId: row.productId,
+          quantityDelta: row.quantity,
+          unit: row.unit,
+          reason: 'opening',
+          sourceType: 'opening_stock',
+          sourceId: input.requestId,
+          actorId,
+          deviceId,
+          commandId: input.requestId,
+          unitCostMinor: row.unitCostMinor,
+        });
+
+        // `products.cost_minor` is the latest known purchase cost and a display fallback (ADR 0009
+        // keeps valuation layer-based). It moves only when the file stated a cost — an omitted cost
+        // must not rewrite what the buyer already recorded for the product.
+        if (row.costWasGiven) {
+          await trx.updateTable('products').set({ cost_minor: row.unitCostMinor, updated_at: new Date() }).where('id', '=', row.productId).execute();
+        }
+      }
+
+      await this.events.audit(trx, {
+        tenantId,
+        branchId: input.branchId,
+        actorId,
+        deviceId,
+        action: 'opening_stock.imported',
+        aggregateType: 'StockOpening',
+        aggregateId: input.requestId,
+        after: {
+          lineCount: plan.rows.length,
+          totalQuantity: plan.totalQuantity,
+          totalValueMinor: plan.totalValueMinor,
+          warningCount: plan.warnings.length,
+        },
+        correlationId,
+      });
+      // Deliberately no server event and no outbox row: this is a management action run on the
+      // server rather than a command from a device, and every device already refetches the whole
+      // balance projection on its next sync — the event would be written with no reader.
+    });
+
+    return report;
+  }
+
+  /** The branch's existing default location, WITHOUT creating one — a preview must write nothing. */
+  private async findLocation(tenantId: string, branchId: string): Promise<string | null> {
+    const row = await this.dbs.db
+      .selectFrom('stock_locations')
+      .select('id')
+      .where('tenant_id', '=', tenantId)
+      .where('branch_id', '=', branchId)
+      .executeTakeFirst();
+    return row?.id ?? null;
+  }
+
+  /**
+   * Everything the planner needs, read once outside the transaction. Balances are loaded for the
+   * whole branch rather than only the SKUs in the file: the planner never queries, so it stays a
+   * pure function, and a superette's single-branch balance table is small enough to read whole.
+   */
+  private async openingStockReference(tenantId: string, branchId: string, locationId: string | null): Promise<OpeningStockReference> {
+    const db = this.dbs.db;
+    const [products, balances, openings, trading] = await Promise.all([
+      db
+        .selectFrom('products')
+        .select(['id', 'sku', 'name', 'unit', 'cost_minor', 'is_stock_tracked'])
+        .where('tenant_id', '=', tenantId)
+        .where('deleted_at', 'is', null)
+        .execute(),
+      locationId
+        ? db
+            .selectFrom('stock_balances')
+            .select(['product_id', 'quantity'])
+            .where('tenant_id', '=', tenantId)
+            .where('branch_id', '=', branchId)
+            .where('location_id', '=', locationId)
+            .execute()
+        : Promise.resolve([]),
+      db
+        .selectFrom('inventory_movements')
+        .select('product_id')
+        .where('tenant_id', '=', tenantId)
+        .where('branch_id', '=', branchId)
+        .where('source_type', '=', 'opening_stock')
+        .execute(),
+      db
+        .selectFrom('inventory_movements')
+        .select('id')
+        .where('tenant_id', '=', tenantId)
+        .where('branch_id', '=', branchId)
+        .where('source_type', '!=', 'opening_stock')
+        .limit(1)
+        .executeTakeFirst(),
+    ]);
+
+    const productsBySku = new Map<string, OpeningStockProduct>();
+    const skuCounts = new Map<string, number>();
+    for (const row of products) {
+      const key = row.sku.toLowerCase();
+      skuCounts.set(key, (skuCounts.get(key) ?? 0) + 1);
+      // First wins; an SKU that exists more than once (case variants pass the unique index) is
+      // reported as ambiguous instead of letting this import pick one of them arbitrarily.
+      if (productsBySku.has(key)) continue;
+      productsBySku.set(key, {
+        id: row.id,
+        sku: row.sku,
+        name: row.name,
+        unit: row.unit,
+        costMinor: Number(row.cost_minor),
+        isStockTracked: row.is_stock_tracked,
+      });
+    }
+
+    const onHandByProduct = new Map<string, number>();
+    for (const balance of balances) onHandByProduct.set(balance.product_id, Number(balance.quantity));
+
+    return {
+      productsBySku,
+      ambiguousSkus: new Set([...skuCounts].filter(([, count]) => count > 1).map(([key]) => key)),
+      onHandByProduct,
+      productsWithOpening: new Set(openings.map((row) => row.product_id)),
+      branchAlreadyTrading: trading !== undefined,
     };
   }
 

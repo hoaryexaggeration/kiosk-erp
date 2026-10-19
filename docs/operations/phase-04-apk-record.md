@@ -5,12 +5,12 @@ Required by §15 "Mandatory Android APK delivery gate". Every field below is par
 | Field | Value |
 |---|---|
 | **Phase** | 4 — Catalogue, pricing/promotions and inventory (+ post-phase polish) |
-| **App version** | `0.4.4` (versionCode 404) |
-| **Artifact** | `artifacts/retail-erp-p04-v0.4.4.apk` |
-| **SHA-256** | `9e45a6a88b15100817773875f59ec99e174df86a93aa37cefc9ab508a724d7e7` |
+| **App version** | `0.4.5` (versionCode 405) |
+| **Artifact** | `artifacts/retail-erp-p04-v0.4.5.apk` |
+| **SHA-256** | `804f15d75709a7c83957b1ff2d4a47c217438430ac5a2d29cc756b48b6b1a0d3` |
 | **Size** | ~40.2 MB (bundled ML Kit barcode models, unminified debug build) |
 | **Signing** | **Stable internal-test key** (`CN=Kiosk ERP Internal Test`, cert SHA-256 `935c0fbc6993db9ca761b4c3610c71a50d91897fd9b1753d0da3e56dffd056dd`), generated once by `build-apk.sh` and git-ignored (ADR 0005) |
-| **Build** | Docker image `kiosk-erp-android-builder` (JDK 17 + Android SDK 34 + Gradle 8.7); `PHASE=04 VERSION=0.4.4 bash infra/docker/android/build-apk.sh` |
+| **Build** | Docker image `kiosk-erp-android-builder` (JDK 17 + Android SDK 34 + Gradle 8.7); `PHASE=04 VERSION=0.4.5 bash infra/docker/android/build-apk.sh` |
 | **Expected backend** | `apps/api` on `http://<host>:3000/v1`; seed tenant/branch from `seed-dev.ts` (20-product demo catalogue, see `demo-catalogue.md`) |
 
 **Build history inside Phase 4** (each is signed with the same stable key, so each upgrades in place):
@@ -21,6 +21,7 @@ Required by §15 "Mandatory Android APK delivery gate". Every field below is par
 | `0.4.2` | 402 | `65580399f57da74e` | Offline camera scanner (5.1), FIFO valuation (ADR 0009), barcode editing, catalogue import file picker, per-product movement history |
 | `0.4.3` | 403 | `cb6bbe8d363fa843` | UI usability pass: `:core:designsystem`, redesigned Home / Till / Stock / Sync / Setup / Catalogue / Licence |
 | `0.4.4` | 404 | `9e45a6a88b151008` | Scan-to-add made reliable (catalogue pulls itself on enrol/sync, paged fetch), scanner-first till, Products row on Home, 20-product demo catalogue |
+| `0.4.5` | 405 | `804f15d75709a7c8` | Opening-stock import (4.5): `POST /v1/inventory/opening-stock/import` + Stock → Opening stock screen (file picker or typed lines) |
 
 > **Upgrade note.** Phase 3's APK was signed with the throwaway Android debug key, so it **cannot be
 > upgraded in place** by this build (signature mismatch) — uninstall the Phase 3 build first. This is
@@ -163,11 +164,40 @@ Scan-to-add + demo catalogue (`0.4.4`, owner-requested before continuing to 4.5)
   reach the till. The two original seeded barcodes are untouched — they are pinned by the test suite —
   and every tag added since is a valid EAN-13. The seed stays idempotent.
 
+Opening-stock import (`0.4.5`, item 4.5):
+
+- **Server**: `POST /v1/inventory/opening-stock/import` (permission `inventory.receive`) with
+  `branchId`, `requestId`, and either `csv` or `records`. A pure planner
+  (`opening-stock-import.ts`) decides the whole file before the transaction opens; preview and commit
+  run it, and a file with any bad row reports every bad row and writes **nothing**. The report carries
+  `onHandBefore` / `onHandAfter`, unit cost, line value and file totals, plus three warnings that
+  inform without blocking (`OPENING_ALREADY_PRESENT`, `OPENING_COST_UNKNOWN`,
+  `BRANCH_ALREADY_TRADING`).
+- **Opening balances are movements, never an edit.** Each line appends an `inventory_movements` row
+  (`reason: 'opening'`, `source_type: 'opening_stock'`) through the one write path
+  (`applyMovement`), which also opens the FIFO valuation layer that costs that stock from day one.
+  `stock_balances` remains a derived projection — a test asserts the stored quantity equals the sum
+  of its movements. A cost stated in the file updates `products.cost_minor`; an omitted cost never
+  rewrites it. Commit is audited as `opening_stock.imported`.
+- **One `requestId` per file chosen** becomes each movement's `source_id` / `command_id`, so a commit
+  that times out and is retried reports `alreadyApplied: true` instead of opening the stock twice;
+  the ledger's unique index on `(tenant, command, product, source)` is the backstop.
+- **Shared CSV vocabulary** (`domain/csv.ts` gained `canonicalColumn` / `recordsToCsvRows`), so both
+  importers resolve headers and JSON records through one implementation rather than two that could
+  drift.
+- **Device**: Stock → **Opening stock** — pick a CSV/JSON file or type the lines (`SKU-003,40`, the
+  header supplied if omitted) → read the server's report (readiness pill, line/unit/value totals,
+  warnings, problems, and every planned line as *on hand before → after* with its value) →
+  **Import N line(s)**. Success refetches the balances so the Stock list shows the new on-hand, and a
+  replayed commit says *already imported*. Documented in
+  `docs/operations/opening-stock-import.md`.
+
 ## Verification
 
-- `npm run verify` (fixtures + API tests): **49/49** domain-fixture checks and **58/58 API tests**
-  across 8 suites — auth, catalog-import, catalog-pricing, inventory, licensing, sync-sale, plus the
-  `product-import` and `domain-fixtures` unit suites — against Docker Postgres.
+- `npm run verify` (fixtures + API tests): **49/49** domain-fixture checks and **85/85 API tests**
+  across 10 suites — auth, catalog-import, catalog-pricing, inventory, licensing,
+  opening-stock-import, sync-sale, plus the `product-import`, `opening-stock-import` and
+  `domain-fixtures` unit suites — against Docker Postgres.
 - `tsc -p tsconfig.build.json --noEmit`: clean.
 - `seed:dev` run twice against a freshly migrated database: **20 products / 18 barcodes / 18 opening
   movements** both times — the expanded demo catalogue is still idempotent, and the suites above run
@@ -180,7 +210,8 @@ Scan-to-add + demo catalogue (`0.4.4`, owner-requested before continuing to 4.5)
 ## Known limitations (phase-scoped)
 
 - Signed with an **internal-test** key (not a store key); fine for owner testing, not for distribution.
-- Receipts are touch-entry only; camera barcode scanning and printer adapters remain Phase 5.
+- Receipts are touch-entry only; camera barcode scanning shipped as 5.1, receipt rendering / ESC-POS
+  adapters remain Phase 5.10.
 - No shift/session screen yet (Phase 6); `cashSessionId` is nullable.
 - Adjustments support a single line per command in the UI (the server accepts multi-line).
 - **Costing is FIFO with valuation layers** (ADR 0009); full stocktake reconciliation and approvals
@@ -215,6 +246,8 @@ Scan-to-add + demo catalogue (`0.4.4`, owner-requested before continuing to 4.5)
 | 17 | Fresh install → Setup → **Enrol**: the product list appears **without** opening the catalogue first, and scanning `6001000000032` adds Sugar 1kg with a banner naming the item, the cart count and the running total | ☐ |
 | 18 | Home → **Products** opens the catalogue in one tap and shows all 20 seeded products across 5 categories | ☐ |
 | 19 | Till: **Scan a barcode** sits above the search box on both *Find items* and *Cart*; `6001000000087` and `6001000000216` both add Soda 300ml; an unknown code says what to do next; the deactivated Dishwashing liquid never appears in the list | ☐ |
+| 20 | Stock → **Opening stock**: type `SKU-010,5` → the preview shows *on hand 0 → 5* and a **Ready** pill; **Import 1 line(s)** → the Stock list shows 5 for Orange juice | ☐ |
+| 21 | Stock → **Opening stock**: a line naming `SKU-999` produces a red problem report and the import button stays disabled, and re-opening the screen starts clean | ☐ |
 
 A failure involving lost transactions, duplicate posting, corrupted local data or a false
 payment/tax status blocks the phase.
