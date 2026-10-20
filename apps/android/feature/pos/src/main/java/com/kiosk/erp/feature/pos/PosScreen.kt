@@ -50,6 +50,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.kiosk.erp.core.common.Pricing
+import com.kiosk.erp.core.common.Units
 import com.kiosk.erp.core.data.repository.CartLine
 import com.kiosk.erp.core.database.ProductEntity
 import com.kiosk.erp.core.designsystem.Banner
@@ -311,7 +312,7 @@ private fun CartRow(line: CartLine, onStep: (Int) -> Unit, onRemove: () -> Unit)
                     Icon(Icons.Filled.Remove, contentDescription = "One fewer ${line.name}")
                 }
                 Text(
-                    formatQuantity(line.quantity),
+                    Units.formatQuantity(line.quantity),
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold,
                     modifier = Modifier.padding(horizontal = 14.dp),
@@ -333,9 +334,6 @@ private fun CartRow(line: CartLine, onStep: (Int) -> Unit, onRemove: () -> Unit)
 }
 
 /** Quantities are plain numbers: show 3, not 3.0, and 0.5 rather than 0.500. */
-private fun formatQuantity(quantity: Double): String =
-    if (quantity == Math.floor(quantity) && !quantity.isInfinite()) quantity.toLong().toString() else quantity.toString()
-
 @Composable
 private fun TotalsCard(
     lineCount: Int,

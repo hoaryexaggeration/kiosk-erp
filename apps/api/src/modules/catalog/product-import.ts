@@ -18,6 +18,7 @@ const COLUMN_ALIASES: Record<string, string[]> = {
   name: ['name', 'product_name', 'title'],
   description: ['description', 'notes'],
   category: ['category', 'category_name', 'department'],
+  brand: ['brand', 'brand_name', 'manufacturer'],
   tax: ['tax', 'tax_rate', 'vat'],
   unit: ['unit', 'uom', 'unit_of_measure'],
   price: ['price', 'selling_price', 'retail_price', 'unit_price'],
@@ -53,6 +54,8 @@ export interface PlannedProductRow {
   name: string;
   description: string | null;
   categoryName: string | null;
+  /** Kept as written (like `categoryName`) so the service can resolve it after creating missing ones. */
+  brandName: string | null;
   taxCategoryId: string | null;
   unit: string;
   isStockTracked: boolean;
@@ -71,6 +74,8 @@ export interface ProductImportPlan {
   errors: ImportRowError[];
   /** Category names the file referenced that do not exist yet, in first-seen order. */
   categoriesToCreate: string[];
+  /** Brand names the file referenced that do not exist yet, in first-seen order. */
+  brandsToCreate: string[];
   createCount: number;
   updateCount: number;
 }
@@ -86,11 +91,18 @@ export interface ImportReferenceData {
   taxCategoriesByName: Map<string, { id: string; name: string }>;
   /** category name (lower-cased) -> the category. */
   categoriesByName: Map<string, { id: string; name: string }>;
+  /** brand name (lower-cased) -> the brand. */
+  brandsByName: Map<string, { id: string; name: string }>;
 }
 
 export interface ImportOptions {
-  /** Only categories: a tax rate is money, and a typo must never conjure a new VAT rate. */
+  /**
+   * Only categories and brands: a tax rate is money, and a typo must never conjure a new VAT rate.
+   * Brands are cheap labels, but they still exist only when the operator asked for them to be
+   * created — an unknown word is a typo until someone says otherwise.
+   */
   createMissingCategories: boolean;
+  createMissingBrands: boolean;
 }
 
 /**
@@ -120,16 +132,19 @@ export function planProductImport(
   const errors: ImportRowError[] = [];
   const planned: PlannedProductRow[] = [];
   const categoriesToCreate: string[] = [];
+  const brandsToCreate: string[] = [];
   const pendingCategoryKeys = new Set<string>();
+  const pendingBrandKeys = new Set<string>();
 
   if (rows.length === 0) {
-    return { rows: [], errors: [{ line: 1, sku: null, field: null, code: 'EMPTY_FILE', message: 'The file has no rows' }], categoriesToCreate, createCount: 0, updateCount: 0 };
+    return { rows: [], errors: [{ line: 1, sku: null, field: null, code: 'EMPTY_FILE', message: 'The file has no rows' }], categoriesToCreate, brandsToCreate, createCount: 0, updateCount: 0 };
   }
   if (rows.length - 1 > MAX_IMPORT_ROWS) {
     return {
       rows: [],
       errors: [{ line: 1, sku: null, field: null, code: 'TOO_MANY_ROWS', message: `A file may contain at most ${MAX_IMPORT_ROWS} products` }],
       categoriesToCreate,
+      brandsToCreate,
       createCount: 0,
       updateCount: 0,
     };
@@ -159,11 +174,11 @@ export function planProductImport(
     }
   }
   if (errors.length > 0) {
-    return { rows: [], errors, categoriesToCreate, createCount: 0, updateCount: 0 };
+    return { rows: [], errors, categoriesToCreate, brandsToCreate, createCount: 0, updateCount: 0 };
   }
   if (rows.length === 1) {
     errors.push({ line: header.line, sku: null, field: null, code: 'EMPTY_FILE', message: 'The file has a header but no product rows' });
-    return { rows: [], errors, categoriesToCreate, createCount: 0, updateCount: 0 };
+    return { rows: [], errors, categoriesToCreate, brandsToCreate, createCount: 0, updateCount: 0 };
   }
 
   const hasBarcodeColumn = index.has('barcodes');
@@ -272,6 +287,26 @@ export function planProductImport(
       }
     }
 
+    // Brands follow the same rule as categories: they exist when they are already known, or when
+    // the operator asked for missing ones to be created. An unknown brand is a typo until then.
+    let brandName: string | null = null;
+    const brandText = valueAt(row, 'brand') ?? '';
+    if (brandText.length > 0) {
+      brandName = brandText;
+      const existing = reference.brandsByName.get(brandText.toLowerCase());
+      if (!existing) {
+        if (!options.createMissingBrands) {
+          fail('brand', 'UNKNOWN_BRAND', `Unknown brand "${brandText}"`);
+        } else {
+          const key = brandText.toLowerCase();
+          if (!pendingBrandKeys.has(key)) {
+            pendingBrandKeys.add(key);
+            brandsToCreate.push(brandText);
+          }
+        }
+      }
+    }
+
     let barcodes: string[] | null = null;
     if (hasBarcodeColumn) {
       const barcodeText = valueAt(row, 'barcodes') ?? '';
@@ -333,6 +368,7 @@ export function planProductImport(
       name,
       description: description.length === 0 ? null : description,
       categoryName,
+      brandName,
       taxCategoryId,
       unit,
       isStockTracked,
@@ -347,6 +383,7 @@ export function planProductImport(
     rows: planned,
     errors,
     categoriesToCreate,
+    brandsToCreate,
     createCount: planned.filter((row) => row.action === 'create').length,
     updateCount: planned.filter((row) => row.action === 'update').length,
   };

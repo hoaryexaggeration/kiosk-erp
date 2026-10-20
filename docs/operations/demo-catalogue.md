@@ -1,8 +1,9 @@
 # Demo catalogue (development seed)
 
 The dev seed (`npm --workspace apps/api run seed:dev`) loads a shop-shaped catalogue so that a phone
-test has something real to look at: several categories, weighed and counted units, barcodes to scan,
-stock with valuation layers, and a few deliberately awkward rows that exist to prove a rule.
+test has something real to look at: several categories, a unit vocabulary with counted and weighed
+kinds, brands, pack sizes, barcodes to scan, stock with valuation layers, and a few deliberately
+awkward rows that exist to prove a rule.
 
 **It is demo data, not tax advice.** Rates and the chart of accounts still need accountant sign-off
 (Phase 8) — see `docs/product/decision-register.md`.
@@ -32,6 +33,43 @@ Groceries · Beverages · Fresh produce · Household · Personal care
 | VAT 16% (inclusive) | 1600 bp | the default for everything below |
 | Zero-rated (0%) | 0 bp | applied to loose fresh produce, so a 0% line can be rung through the till next to 16% |
 
+## Units of measure
+
+Nine units, each with a `kind` — the kind is the rule the ledger applies to a quantity in it
+(`count` must come out whole, `weight`/`volume` need not), not a label:
+
+| Code | Name | Kind |
+|---|---|---|
+| `ea` · `bottle` · `crate` · `pack` · `tray` | Each · Bottle · Crate · Pack · Tray | count |
+| `kg` · `g` | Kilogram · Gram | weight |
+| `l` · `ml` | Litre · Millilitre | volume |
+
+## Brands
+
+| Brand | Carried by |
+|---|---|
+| Savannah Foods | SKU-003…007 (groceries) |
+| Kaskazi Drinks | SKU-008…010 (beverages) |
+| Neema Home | SKU-014…018, SKU-020 (household, personal care) |
+| *none* | SKU-001, SKU-002, SKU-011, SKU-012, SKU-013, SKU-019 |
+
+Loose produce and the two original lines are deliberately **unbranded**, so an empty brand is visible
+in the list and an import file without a `brand` column has something to leave alone.
+
+## Pack sizes (unit conversions)
+
+Four conversions, each relative to the product's own unit:
+
+| Product | Pack | Base | Proves |
+|---|---|---|---|
+| SKU-008 Soda 300ml | 1 `crate` | 24 `ea` | buying by the crate, selling by the bottle, one ledger |
+| SKU-009 Drinking water 1L | 1 `crate` | 12 `ea` | a crate is 12 of *these* and 24 of *those* — factors belong to the product |
+| SKU-013 Eggs tray (30) | 1 `tray` | 30 `ea` | an adjustment of 2 trays reads `2 tray → +60 ea` in history |
+| SKU-011 Tomatoes | 1 `g` | 0.001 `kg` | weighed stock may be fractional; a counted one may not |
+
+Stock is only ever held in the base unit (`ea` or `kg`); the pack travels beside the number so the
+history can say `10 crate → +240 ea`. See `units-and-conversions.md`.
+
 ## Products
 
 Prices and costs are shown in KES; the system stores integer minor units.
@@ -59,13 +97,16 @@ Prices and costs are shown in KES; the system stores integer minor units.
 | SKU-019 | Mobile top-up KES 100 | — | ea | 100.00 | 100.00 | none | — |
 | SKU-020 | Dishwashing liquid 750ml | Household | ea | 240.00 | 195.00 | `6001000000209` | 14 |
 
-20 products · 18 barcodes · 18 opening movements (one per product that was received).
+20 products · 18 barcodes · 9 units · 3 brands · 4 pack conversions · 18 opening movements (one per
+product that was received).
 
 ## What each awkward row is for
 
 | Row | Proves |
 |---|---|
 | SKU-008 has **two** barcodes | barcodes are a SET: both tags resolve to the same product, and removing one in the editor removes it everywhere after sync |
+| The same word means **different amounts** (crate = 24 for SKU-008, 12 for SKU-009; tray = 30 for SKU-013) | a pack size belongs to the product, not to "crate" — so the factor is read from the product before anything is converted |
+| SKU-011 is weighed and converts `g → kg` | fractions are legal there (`500 g` → `0.5 kg`) while `1.3 crate` of a counted line is refused rather than rounded |
 | SKU-011 / SKU-012 have **no** barcode | search and tap-to-add still work; scanning is not the only way in |
 | SKU-010 was **never received** | "no stock recorded" shows as `—`, never as `0` |
 | SKU-019 is **not stock-tracked** | no stock row exists at all, and it has no category, so the empty category is visible too |

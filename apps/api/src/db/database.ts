@@ -105,6 +105,39 @@ export interface CategoriesTable {
   name: string;
   parent_id: string | null;
 }
+/**
+ * The vocabulary a tenant's stock is expressed in (item 4.6). `kind` decides what the ledger will
+ * accept: `count` quantities stay whole, `weight`/`volume` may be fractional.
+ */
+export interface UnitsOfMeasureTable {
+  id: Generated<string>;
+  tenant_id: string;
+  code: string;
+  name: string;
+  kind: Generated<string>;
+  created_at: Generated<Date>;
+}
+/**
+ * `1 <unit> = <factor> <product's base unit>` — a fact about one product (item 4.6). The base unit
+ * itself has no row: it is implicitly factor 1, and a conversion to it needs no lookup beyond this.
+ */
+export interface UnitConversionsTable {
+  id: Generated<string>;
+  tenant_id: string;
+  product_id: string;
+  unit: string;
+  /** `numeric(18,6)` — read with `Number(...)`, exactly like every other numeric column here. */
+  factor: number;
+  created_at: Generated<Date>;
+  updated_at: Generated<Date>;
+}
+export interface BrandsTable {
+  id: Generated<string>;
+  tenant_id: string;
+  name: string;
+  created_at: Generated<Date>;
+  updated_at: Generated<Date>;
+}
 export interface ProductsTable {
   id: string;
   tenant_id: string;
@@ -113,6 +146,7 @@ export interface ProductsTable {
   description: string | null;
   category_id: string | null;
   tax_category_id: string | null;
+  brand_id: string | null;
   unit: Generated<string>;
   is_stock_tracked: Generated<boolean>;
   is_active: Generated<boolean>;
@@ -177,6 +211,12 @@ export interface InventoryMovementsTable {
   approval_note: string | null;
   /** Derived FIFO cost of an outbound movement (ADR 0009); null for inbound. */
   cogs_minor: number | null;
+  /**
+   * The unit/quantity a movement was WRITTEN in when that differed from the base unit (item 4.6) —
+   * NULL in the overwhelmingly common case, and never one without the other.
+   */
+  entered_unit: string | null;
+  entered_quantity: number | null;
   occurred_at: Generated<Date>;
   created_at: Generated<Date>;
 }
@@ -492,6 +532,9 @@ export interface Database {
   config_versions: ConfigVersionsTable;
   tax_categories: TaxCategoriesTable;
   categories: CategoriesTable;
+  units_of_measure: UnitsOfMeasureTable;
+  unit_conversions: UnitConversionsTable;
+  brands: BrandsTable;
   products: ProductsTable;
   barcodes: BarcodesTable;
   customers: CustomersTable;

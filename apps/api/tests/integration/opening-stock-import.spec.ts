@@ -280,4 +280,65 @@ describe('opening-stock import (Phase 4, item 4.5)', () => {
     expect(res.status).toBe(404);
     expect(res.body.code).toBe('UNKNOWN_BRANCH');
   });
+
+  /**
+   * Item 4.6 through the file route: a superette types opening stock the way the supplier wrote it —
+   * by the crate — and the plan shows (and a commit writes) the base unit the ledger holds.
+   */
+  it('converts a quantity written in a pack, previewing and committing the same numbers (item 4.6)', async () => {
+    const product = await productBySku('SKU-008'); // demo soda: 24 bottles to a crate, 48 on hand
+    const before = await balanceOf(product.id);
+    const csv = 'sku,quantity,unit,unit_cost\nSKU-008,10,crate,240';
+
+    const preview = await runImport(token, { branchId: SEED.branchId, requestId: uuid(), csv });
+    expect(preview.status).toBe(201);
+    expect(preview.body.errors).toEqual([]);
+    expect(preview.body.preview[0]).toMatchObject({
+      sku: 'SKU-008',
+      unit: 'ea',
+      quantity: 240,
+      enteredUnit: 'crate',
+      enteredQuantity: 10,
+      unitCostMinor: 1000,
+      onHandAfter: before + 240,
+    });
+    expect(preview.body).toMatchObject({ totalQuantity: 240, totalValueMinor: 10 * 24000 });
+
+    const requestId = uuid();
+    const committed = await runImport(token, { branchId: SEED.branchId, requestId, csv, commit: true });
+    expect(committed.body).toMatchObject({ status: 'committed', validCount: 1, totalValueMinor: 10 * 24000 });
+    expect(await balanceOf(product.id)).toBe(before + 240);
+
+    const imported = (await openingMovements(product.id)).find((movement) => movement.source_id === requestId);
+    expect(imported).toMatchObject({
+      quantity_delta: 240,
+      unit: 'ea',
+      entered_unit: 'crate',
+      entered_quantity: 10,
+      command_id: requestId,
+    });
+
+    // 240 bottles at the KES 10.00 a bottle the crate price works out to — 10 × KES 240 either way.
+    const layer = await dbs.db
+      .selectFrom('inventory_valuation_layers')
+      .selectAll()
+      .where('product_id', '=', product.id)
+      .where('source_movement_id', '=', imported!.id)
+      .executeTakeFirstOrThrow();
+    expect(layer).toMatchObject({ unit_cost_minor: 1000, quantity_received: 240, quantity_remaining: 240 });
+    expect(Number((await productBySku('SKU-008')).cost_minor)).toBe(1000);
+  });
+
+  it('reports an unknown pack on its row instead of importing it as the base unit (item 4.6)', async () => {
+    const res = await runImport(token, {
+      branchId: SEED.branchId,
+      requestId: uuid(),
+      csv: 'sku,quantity,unit\nSKU-008,10,pallet',
+      commit: false,
+    });
+    expect(res.status).toBe(201);
+    expect(res.body.errors).toMatchObject([{ code: 'UNKNOWN_CONVERSION', field: 'unit', sku: 'SKU-008' }]);
+    expect(res.body.preview).toEqual([]);
+    expect(res.body.totalQuantity).toBe(0);
+  });
 });

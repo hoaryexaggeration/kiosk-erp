@@ -14,6 +14,7 @@ import {
   recordsToCsvRows,
 } from './opening-stock-import';
 import { roundHalfUp } from '../../domain/pricing';
+import { convertQuantity, UnitKind } from '../../domain/units';
 
 export interface InventoryContext {
   tenantId: string;
@@ -39,7 +40,11 @@ export interface ApplyMovement {
   commandId?: string | null;
   approvedBy?: string | null;
   approvalNote?: string | null;
-  /** Inbound only: the cost that opens a FIFO valuation layer (ADR 0009). */
+  /**
+   * Inbound only: the cost per BASE unit that opens a FIFO valuation layer (ADR 0009). Converting a
+   * cost the supplier quoted for a pack into that per-unit figure is the caller's job — see
+   * `receiveStock`, which divides by the same factor it multiplied the quantity by.
+   */
   unitCostMinor?: number;
 }
 
@@ -50,7 +55,39 @@ export interface MovementResult {
   cogsMinor: number;
   /** Outbound quantity with no layer to draw on — i.e. stock went negative. */
   uncostedQuantity: number;
+  /** The quantity actually written to the ledger, in the base unit (item 4.6). */
+  baseQuantity: number;
 }
+
+/**
+ * A quantity expressed in some unit, translated into the product's BASE unit — item 4.6, "buying in
+ * crates and selling in pieces keeps one stock ledger".
+ *
+ * `baseQuantity` is the ONLY number the ledger may store. `factor` and `kind` come along so a
+ * receipt can convert its cost by exactly the same factor it converted its quantity (a crate price
+ * becomes a bottle price), and `converted` says whether any translation happened at all — when it
+ * did, the pair the operator typed is remembered alongside the movement so history can show
+ * "10 crate → +240 ea" instead of a number no GRN contains.
+ */
+export interface ResolvedQuantity {
+  baseQuantity: number;
+  baseUnit: string;
+  /** How many base units one stated unit contains; 1 when nothing was converted. */
+  factor: number;
+  kind: UnitKind;
+  converted: boolean;
+}
+
+/**
+ * The outcome of resolving one line. `missing` keeps today's behaviour of skipping a product that no
+ * longer exists rather than failing a whole document; `invalid` is a refusal the caller reports as a
+ * rejected command WITH a stable code, so the operator learns which pack size was never defined
+ * instead of receiving stock in the wrong unit.
+ */
+export type ResolveOutcome =
+  | { status: 'ok'; resolved: ResolvedQuantity }
+  | { status: 'missing' }
+  | { status: 'invalid'; code: string; message: string };
 
 /** Normalised outcome of applying an inventory aggregate through the sync command path. */
 export interface ApplyResult {
@@ -73,6 +110,12 @@ export interface OpeningStockPreviewRow {
   name: string;
   unit: string;
   quantity: number;
+  /**
+   * What the file said when it named a unit other than the product's base one (item 4.6): null for
+   * the overwhelming majority of rows, and the reason the numbers above it differ from the file.
+   */
+  enteredUnit: string | null;
+  enteredQuantity: number | null;
   onHandBefore: number;
   onHandAfter: number;
   unitCostMinor: number;
@@ -143,9 +186,114 @@ export class InventoryService {
   }
 
   /**
+   * Translate a quantity written in `unit` into the product's base unit — THE one place that
+   * decides what reaches the ledger (item 4.6).
+   *
+   * One left-joined query returns the product's base unit, its kind (what a quantity in that unit
+   * is allowed to be) and the factor of the unit the caller named. Everything else follows the
+   * shared contract in `domain/units.ts`, so the refusal an operator sees for "1.3 crates" is the
+   * same refusal the fixtures check in JavaScript, Kotlin and Swift.
+   *
+   * The identity path (no unit, or the unit IS the base) short-circuits before any conversion: the
+   * quantity is recorded exactly as given, with no rounding and no new refusal — nothing about a
+   * movement that was already correct changes today.
+   */
+  private async resolveQuantity(
+    trx: Kysely<Database>,
+    tenantId: string,
+    productId: string,
+    quantity: number,
+    unit?: string | null,
+  ): Promise<ResolveOutcome> {
+    const requested = (unit ?? '').trim();
+    // `requested` is empty for the identity case, which matches no conversion row — the CHECK on
+    // the table forbids an empty unit code.
+    const row = await sql<{ base_unit: string | null; kind: string | null; factor: string | null }>`
+      SELECT p.unit AS base_unit,
+             u.kind,
+             uc.factor
+        FROM products p
+        LEFT JOIN units_of_measure u
+          ON u.tenant_id = p.tenant_id AND lower(u.code) = lower(p.unit)
+        LEFT JOIN unit_conversions uc
+          ON uc.tenant_id = p.tenant_id AND uc.product_id = p.id AND lower(uc.unit) = lower(${requested})
+       WHERE p.id = ${productId} AND p.tenant_id = ${tenantId}
+    `.execute(trx);
+
+    const baseUnit = row.rows[0]?.base_unit ?? null;
+    if (baseUnit === null) return { status: 'missing' };
+
+    const kind = (row.rows[0]?.kind ?? 'count') as UnitKind;
+    if (requested.length === 0 || requested.toLowerCase() === baseUnit.toLowerCase()) {
+      // The pack rule applies to the base unit too: `0.5 ea` is not a thing a shop can hold, however
+      // the quantity was written. When the unit's kind is unknown we deliberately do NOT fall back
+      // to `count` — with no rule there is no refusal (and no rounding either), because inventing a
+      // rule for a weighed product nobody typed into the vocabulary would stop a legal receipt.
+      if (row.rows[0]?.kind != null) {
+        const identity = convertQuantity({ quantity, fromFactor: 1, toFactor: 1, kind });
+        if (!identity.ok) {
+          return {
+            status: 'invalid',
+            code: identity.code,
+            message:
+              identity.code === 'FRACTIONAL_QUANTITY'
+                ? `${baseUnit} is counted, so a quantity in it must be a whole number — ${quantity} is not`
+                : `Cannot accept ${quantity} ${baseUnit}`,
+          };
+        }
+        return {
+          status: 'ok',
+          resolved: { baseQuantity: identity.quantity, baseUnit, factor: 1, kind, converted: false },
+        };
+      }
+      return {
+        status: 'ok',
+        resolved: { baseQuantity: quantity, baseUnit, factor: 1, kind, converted: false },
+      };
+    }
+
+    const factorRaw = row.rows[0]?.factor ?? null;
+    if (row.rows[0]?.kind == null) {
+      return {
+        status: 'invalid',
+        code: 'UNKNOWN_UNIT',
+        message: `Selling unit "${baseUnit}" is not in this shop's unit catalogue — add it under Units first`,
+      };
+    }
+    if (factorRaw === null) {
+      return {
+        status: 'invalid',
+        code: 'UNKNOWN_CONVERSION',
+        message: `No pack size for ${productId}: 1 ${requested} is not defined as ${baseUnit}. Add the conversion under the product first`,
+      };
+    }
+
+    const outcome = convertQuantity({ quantity, fromFactor: Number(factorRaw), toFactor: 1, kind });
+    if (!outcome.ok) {
+      return {
+        status: 'invalid',
+        code: outcome.code,
+        message:
+          outcome.code === 'FRACTIONAL_QUANTITY'
+            ? `${quantity} ${requested} is not a whole number of ${baseUnit}, which is counted rather than weighed`
+            : `Cannot express ${quantity} ${requested} in ${baseUnit}`,
+      };
+    }
+    return {
+      status: 'ok',
+      resolved: { baseQuantity: outcome.quantity, baseUnit, factor: Number(factorRaw), kind, converted: true },
+    };
+  }
+
+  /**
    * The single write path for on-hand stock. Appends the movement fact, updates the derived
    * balance, and applies FIFO valuation (ADR 0009): a receipt opens a cost layer; an issue
    * consumes the oldest open layers and records exactly what it cost.
+   *
+   * This is also the choke point for item 4.6: whatever unit a caller's quantity is written in, the
+   * row that lands records the BASE quantity and base unit, so no path — a receipt in crates, an
+   * adjustment in packs, a future transfer in trays — can append to a second ledger. The pack it
+   * arrived as is kept in `entered_unit`/`entered_quantity` when a conversion actually happened.
    *
    * A movement is never withheld to preserve a fact — if an issue outruns the available layers the
    * movement still stands and `uncostedQuantity` reports the shortfall so the caller can raise a
@@ -153,6 +301,14 @@ export class InventoryService {
    */
   async applyMovement(trx: Kysely<Database>, m: ApplyMovement): Promise<MovementResult> {
     const movementId = crypto.randomUUID();
+    const outcome = await this.resolveQuantity(trx, m.tenantId, m.productId, m.quantityDelta, m.unit);
+    if (outcome.status === 'invalid') throw new AppError(outcome.code, outcome.message, 400);
+    // A product that has vanished still deserves its fact recorded, exactly as it always has.
+    const resolved: ResolvedQuantity | null = outcome.status === 'ok' ? outcome.resolved : null;
+    const baseQuantity = resolved ? resolved.baseQuantity : m.quantityDelta;
+    const baseUnit = resolved ? resolved.baseUnit : m.unit ?? 'ea';
+    const converted = resolved?.converted ?? false;
+
     await trx
       .insertInto('inventory_movements')
       .values({
@@ -161,8 +317,11 @@ export class InventoryService {
         branch_id: m.branchId,
         location_id: m.locationId,
         product_id: m.productId,
-        quantity_delta: m.quantityDelta,
-        unit: m.unit ?? 'ea',
+        quantity_delta: baseQuantity,
+        unit: baseUnit,
+        // Only a real conversion leaves a trace; a movement already in the base unit adds no noise.
+        entered_unit: converted ? (m.unit ?? null) : null,
+        entered_quantity: converted ? m.quantityDelta : null,
         reason: m.reason,
         source_type: m.sourceType,
         source_id: m.sourceId ?? null,
@@ -177,7 +336,7 @@ export class InventoryService {
 
     const row = await sql<{ quantity: number }>`
       INSERT INTO stock_balances (tenant_id, branch_id, location_id, product_id, quantity, updated_at)
-      VALUES (${m.tenantId}, ${m.branchId}, ${m.locationId}, ${m.productId}, ${m.quantityDelta}, now())
+      VALUES (${m.tenantId}, ${m.branchId}, ${m.locationId}, ${m.productId}, ${baseQuantity}, now())
       ON CONFLICT (tenant_id, branch_id, location_id, product_id)
       DO UPDATE SET quantity = stock_balances.quantity + EXCLUDED.quantity, updated_at = now()
       RETURNING quantity
@@ -187,7 +346,7 @@ export class InventoryService {
     let cogsMinor = 0;
     let uncostedQuantity = 0;
 
-    if (m.quantityDelta > 0) {
+    if (baseQuantity > 0) {
       // Inbound opens a layer at the stated cost (0 when genuinely unknown; the receipt path
       // substitutes the last known purchase cost so stock is never silently valued at zero).
       await trx
@@ -200,12 +359,12 @@ export class InventoryService {
           product_id: m.productId,
           source_movement_id: movementId,
           unit_cost_minor: m.unitCostMinor ?? 0,
-          quantity_received: m.quantityDelta,
-          quantity_remaining: m.quantityDelta,
+          quantity_received: baseQuantity,
+          quantity_remaining: baseQuantity,
         })
         .execute();
-    } else if (m.quantityDelta < 0) {
-      let needed = -m.quantityDelta;
+    } else if (baseQuantity < 0) {
+      let needed = -baseQuantity;
       const layers = await trx
         .selectFrom('inventory_valuation_layers')
         .select(['id', 'unit_cost_minor', 'quantity_remaining'])
@@ -253,7 +412,7 @@ export class InventoryService {
       }
     }
 
-    return { quantity, cogsMinor, uncostedQuantity };
+    return { quantity, cogsMinor, uncostedQuantity, baseQuantity };
   }
 
   /** Remaining value of open FIFO layers for one product at one location. */
@@ -268,11 +427,27 @@ export class InventoryService {
     return Math.round(Number(row.rows[0]?.value_minor ?? 0));
   }
 
-  /** Stock receipt (GRN): increase on-hand and open a FIFO valuation layer per line (ADR 0009). */
+  /**
+   * Stock receipt (GRN): increase on-hand and open a FIFO valuation layer per line (ADR 0009).
+   *
+   * Item 4.6: every line is resolved into the product's base unit BEFORE a single movement is
+   * written, so a receipt that names a pack size the product cannot convert is refused whole
+   * instead of half-applying. The cost a supplier quoted is per the unit they charged for — a crate
+   * price becomes a per-bottle price through the same factor as the quantity, which is what keeps
+   * the layer's value equal to the invoice the shop actually paid.
+   */
   async receiveStock(trx: Kysely<Database>, ctx: InventoryContext, payload: StockReceiptPayload): Promise<ApplyResult> {
     const receipt = payload.receipt;
     const locationId = receipt.locationId ?? (await this.getOrCreateLocation(trx, ctx.tenantId, ctx.branchId));
     let totalValueMinor = 0;
+    let convertedLines = 0;
+
+    interface PreparedLine {
+      line: StockReceiptPayload['receipt']['lines'][number];
+      product: { cost_minor: number; unit: string };
+      resolved: ResolvedQuantity;
+    }
+    const prepared: PreparedLine[] = [];
 
     for (const line of receipt.lines) {
       const product = await trx
@@ -283,9 +458,25 @@ export class InventoryService {
         .executeTakeFirst();
       if (!product || product.deleted_at) continue;
 
-      // Without an explicit cost the last known purchase cost is used, so a receipt always opens a
-      // costed layer (ADR 0009) rather than silently valuing incoming stock at zero.
-      const unitCostMinor = line.unitCostMinor ?? Number(product.cost_minor);
+      const outcome = await this.resolveQuantity(trx, ctx.tenantId, line.productId, line.quantity, line.unit);
+      if (outcome.status === 'missing') continue;
+      if (outcome.status === 'invalid') {
+        return { status: 'rejected' as const, code: outcome.code, message: outcome.message };
+      }
+      if (outcome.resolved.converted) convertedLines += 1;
+      prepared.push({ line, product, resolved: outcome.resolved });
+    }
+
+    for (const { line, product, resolved } of prepared) {
+      // A cost is quoted per the unit on the paperwork. `products.cost_minor` is the opposite: the
+      // latest known cost PER BASE UNIT (it is what an uncosted fallback layer would use), so it is
+      // never divided — only a cost the supplier actually stated travels down the factor.
+      const unitCostMinor =
+        line.unitCostMinor !== undefined
+          ? resolved.converted
+            ? roundHalfUp(line.unitCostMinor / resolved.factor)
+            : line.unitCostMinor
+          : Number(product.cost_minor);
 
       await this.applyMovement(trx, {
         tenantId: ctx.tenantId,
@@ -306,9 +497,11 @@ export class InventoryService {
       if (line.unitCostMinor !== undefined) {
         // `products.cost_minor` is retained only as the latest known purchase cost (display and the
         // fallback layer cost above); valuation itself is entirely layer-based.
-        await trx.updateTable('products').set({ cost_minor: line.unitCostMinor, updated_at: new Date() }).where('id', '=', line.productId).execute();
+        await trx.updateTable('products').set({ cost_minor: unitCostMinor, updated_at: new Date() }).where('id', '=', line.productId).execute();
       }
-      totalValueMinor += roundHalfUp(line.quantity * unitCostMinor);
+      // Value of the lines as the layers will hold them: base quantity × per-base-unit cost, so the
+      // audit total can never disagree with the valuation the same transaction just opened.
+      totalValueMinor += roundHalfUp(resolved.baseQuantity * unitCostMinor);
     }
 
     await this.events.audit(trx, {
@@ -319,7 +512,7 @@ export class InventoryService {
       action: 'stock.received',
       aggregateType: 'StockReceipt',
       aggregateId: receipt.id,
-      after: { lineCount: receipt.lines.length, totalValueMinor },
+      after: { lineCount: receipt.lines.length, totalValueMinor, convertedLines },
       correlationId: ctx.correlationId,
     });
     const seq = await this.events.serverEvent(trx, {
@@ -341,14 +534,34 @@ export class InventoryService {
     const locationId = adjustment.locationId ?? (await this.getOrCreateLocation(trx, ctx.tenantId, ctx.branchId));
     let negative = false;
     let uncosted = false;
+    let convertedLines = 0;
 
-    // Validate every line before writing a single movement: a partially applied adjustment must
-    // never commit. A negative adjustment needs an explicit supervisor override note.
+    interface PreparedLine {
+      line: StockAdjustmentPayload['adjustment']['lines'][number];
+      resolved: ResolvedQuantity;
+    }
+    const prepared: PreparedLine[] = [];
+
+    // Resolve EVERY line first — the pack size as well as the reason — because a partially applied
+    // adjustment must never commit: "−2 crates" is either recorded as −48 bottles or not at all.
+    for (const line of adjustment.lines) {
+      const outcome = await this.resolveQuantity(trx, ctx.tenantId, line.productId, line.quantityDelta, line.unit);
+      if (outcome.status === 'missing') continue;
+      if (outcome.status === 'invalid') {
+        return { status: 'rejected' as const, code: outcome.code, message: outcome.message };
+      }
+      if (outcome.resolved.converted) convertedLines += 1;
+      prepared.push({ line, resolved: outcome.resolved });
+    }
+
+    // A negative adjustment needs an explicit supervisor override note. The comparison is against
+    // the BASE quantity, because that is what the balance holds — comparing 2 crates against 24
+    // bottles would approve a write the projection then refuses.
     if (!adjustment.approvalNote) {
-      for (const line of adjustment.lines) {
-        if (line.quantityDelta >= 0) continue;
+      for (const { line, resolved } of prepared) {
+        if (resolved.baseQuantity >= 0) continue;
         const available = await this.onHand(trx, ctx.tenantId, ctx.branchId, locationId, line.productId);
-        if (available + line.quantityDelta < 0) {
+        if (available + resolved.baseQuantity < 0) {
           return {
             status: 'rejected' as const,
             code: 'OVERRIDE_REQUIRED',
@@ -359,21 +572,14 @@ export class InventoryService {
       }
     }
 
-    for (const line of adjustment.lines) {
-      const product = await trx
-        .selectFrom('products')
-        .select(['id', 'unit'])
-        .where('id', '=', line.productId)
-        .where('tenant_id', '=', ctx.tenantId)
-        .executeTakeFirst();
-      if (!product) continue;
+    for (const { line, resolved } of prepared) {
       const movement = await this.applyMovement(trx, {
         tenantId: ctx.tenantId,
         branchId: ctx.branchId,
         locationId,
         productId: line.productId,
         quantityDelta: line.quantityDelta,
-        unit: line.unit ?? product.unit,
+        unit: line.unit ?? resolved.baseUnit,
         reason: adjustment.reason,
         sourceType: 'stock_adjustment',
         sourceId: adjustment.id,
@@ -396,7 +602,7 @@ export class InventoryService {
       aggregateType: 'StockAdjustment',
       aggregateId: adjustment.id,
       reason: adjustment.reason,
-      after: { lineCount: adjustment.lines.length },
+      after: { lineCount: adjustment.lines.length, convertedLines },
       correlationId: ctx.correlationId,
     });
     const seq = await this.events.serverEvent(trx, {
@@ -471,6 +677,10 @@ export class InventoryService {
         name: row.name,
         unit: row.unit,
         quantity: row.quantity,
+        // What the file said, when it said something else — the pair the operator checks against
+        // their own paperwork before approving the conversion (item 4.6).
+        enteredUnit: row.enteredUnit,
+        enteredQuantity: row.enteredQuantity,
         onHandBefore: row.onHandBefore,
         onHandAfter: row.onHandAfter,
         unitCostMinor: row.unitCostMinor,
@@ -503,8 +713,11 @@ export class InventoryService {
           branchId: input.branchId,
           locationId: commitLocationId,
           productId: row.productId,
-          quantityDelta: row.quantity,
-          unit: row.unit,
+          // A row written in a pack is committed AS that pack: `applyMovement` converts it to the
+          // base unit (once, by the same rule the planner previewed) and keeps the pair on the
+          // movement, so history reads like the file the operator approved.
+          quantityDelta: row.enteredQuantity ?? row.quantity,
+          unit: row.enteredUnit ?? row.unit,
           reason: 'opening',
           sourceType: 'opening_stock',
           sourceId: input.requestId,
@@ -535,6 +748,8 @@ export class InventoryService {
           totalQuantity: plan.totalQuantity,
           totalValueMinor: plan.totalValueMinor,
           warningCount: plan.warnings.length,
+          // How many rows arrived in a pack rather than the unit stock is held in (item 4.6).
+          convertedLines: plan.rows.filter((row) => row.enteredUnit !== null).length,
         },
         correlationId,
       });
@@ -564,7 +779,7 @@ export class InventoryService {
    */
   private async openingStockReference(tenantId: string, branchId: string, locationId: string | null): Promise<OpeningStockReference> {
     const db = this.dbs.db;
-    const [products, balances, openings, trading] = await Promise.all([
+    const [products, balances, openings, trading, units, conversions] = await Promise.all([
       db
         .selectFrom('products')
         .select(['id', 'sku', 'name', 'unit', 'cost_minor', 'is_stock_tracked'])
@@ -595,7 +810,20 @@ export class InventoryService {
         .where('source_type', '!=', 'opening_stock')
         .limit(1)
         .executeTakeFirst(),
+      // What a unit means, and which packs each product is written in — item 4.6. Both are read
+      // here so the planner stays a pure function that decides conversion, refusal and rounding
+      // before anything is written.
+      db.selectFrom('units_of_measure').select(['code', 'kind']).where('tenant_id', '=', tenantId).execute(),
+      db.selectFrom('unit_conversions').select(['product_id', 'unit', 'factor']).where('tenant_id', '=', tenantId).execute(),
     ]);
+
+    const kindByCode = new Map(units.map((row) => [row.code.toLowerCase(), row.kind as UnitKind]));
+    const conversionsByProduct = new Map<string, Map<string, number>>();
+    for (const row of conversions) {
+      const byProduct = conversionsByProduct.get(row.product_id) ?? new Map<string, number>();
+      byProduct.set(row.unit.toLowerCase(), Number(row.factor));
+      conversionsByProduct.set(row.product_id, byProduct);
+    }
 
     const productsBySku = new Map<string, OpeningStockProduct>();
     const skuCounts = new Map<string, number>();
@@ -610,6 +838,12 @@ export class InventoryService {
         sku: row.sku,
         name: row.name,
         unit: row.unit,
+        // Kind of the base unit, or null when the catalogue has never typed it. A product may only
+        // carry conversions for a base unit the catalogue knows (the catalogue refuses to write
+        // otherwise), so `count` is NOT assumed here: with no kind there is no rule, and inventing
+        // one would let a preview accept what its own commit then refuses.
+        unitKind: kindByCode.get(row.unit.toLowerCase()) ?? null,
+        conversions: conversionsByProduct.get(row.id) ?? new Map<string, number>(),
         costMinor: Number(row.cost_minor),
         isStockTracked: row.is_stock_tracked,
       });
@@ -690,6 +924,11 @@ export class InventoryService {
         'inventory_movements.branch_id',
         'products.sku',
         'inventory_movements.quantity_delta',
+        // The base unit every movement is held in (item 4.6) — history shows one unit per product.
+        'inventory_movements.unit',
+        // What the paperwork said when it was a different unit, e.g. 10 crate for +240 ea.
+        'inventory_movements.entered_unit',
+        'inventory_movements.entered_quantity',
         'inventory_movements.reason',
         'inventory_movements.source_type',
         'inventory_movements.source_id',
@@ -699,6 +938,8 @@ export class InventoryService {
       .where('inventory_movements.tenant_id', '=', tenantId)
       .orderBy('inventory_movements.occurred_at', 'desc');
     if (productId) query = query.where('inventory_movements.product_id', '=', productId);
-    return query.limit(Math.min(limit, 500)).execute();
+    const rows = await query.limit(Math.min(limit, 500)).execute();
+    // `entered_quantity` is `numeric(18,3)`, which Postgres returns as a string — coerced once, here.
+    return rows.map((row) => ({ ...row, entered_quantity: row.entered_quantity === null ? null : Number(row.entered_quantity) }));
   }
 }

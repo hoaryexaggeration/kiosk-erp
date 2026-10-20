@@ -35,6 +35,20 @@ interface ProductDao {
     suspend fun barcodesFor(productId: String): List<String>
 
     /**
+     * Pack sizes for one product (item 4.6), ordered so the editor, the preview and the till always
+     * read the same set in the same order. `factor` is how many base units one of that unit is worth.
+     */
+    @Query("SELECT * FROM product_conversions WHERE productId = :productId ORDER BY unit ASC")
+    suspend fun conversionsFor(productId: String): List<ProductConversionEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertConversions(conversions: List<ProductConversionEntity>)
+
+    /** Conversions are a SET, not an append-only log: a pack retired on the server must stop converting here. */
+    @Query("DELETE FROM product_conversions WHERE productId = :productId")
+    suspend fun deleteConversionsFor(productId: String)
+
+    /**
      * Catalogue search for the management screen. Matches name, SKU or barcode so a shopkeeper can
      * find an item by whichever identifier they have. Capped so a 20 000-SKU catalogue stays snappy.
      */

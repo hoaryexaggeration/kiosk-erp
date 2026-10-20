@@ -48,6 +48,31 @@ Unrecognised columns are **rejected**, not ignored. Required columns are marked 
 | ✅ `sku` (`code`, `item_code`, `item`) | The product code, matched **ignoring case**. The product must already exist and must be stock-tracked. |
 | ✅ `quantity` (`qty`, `on_hand`, `opening_qty`, `opening_quantity`, `count`) | The opening quantity. Must be **more than zero**. Whole numbers or decimals (weighed goods: `12.5` kg). |
 | `unit_cost` (`cost`, `cost_price`, `buying_price`, `purchase_price`, `opening_cost`) | What this stock cost, as a **currency amount**: `95` means KES 95.00. Omitted → the product's recorded cost. |
+| `unit` (`uom`, `unit_of_measure`) | The unit the `quantity` is written in (item 4.6), e.g. `crate` for a product held in `ea`. Omitted → the product's own unit. |
+
+### Writing quantities in a pack
+
+A shelf count taken in crates may be recorded in crates: `SKU-008,10,crate` where soda is held in
+`ea` means **10 crate = 240 ea**, and 240 is what lands in the ledger (1 crate = 24 of that product's
+own unit — see `units-and-conversions.md`). Both numbers survive: the report's preview shows
+`enteredUnit` / `enteredQuantity` above the base quantity, and the movement history reads
+`10 crate → +240 ea`.
+
+Three refusals apply, all on the row, never the whole file:
+
+| Code | Meaning |
+| --- | --- |
+| `UNKNOWN_UNIT` | The product's own unit has never been added to the shop's unit catalogue, so there is no rule to convert *with*. Add it under Catalogue → Manage → Units. |
+| `UNKNOWN_CONVERSION` | The named unit has no pack size on this product — `1 crate` is not defined as `ea` for that SKU. |
+| `FRACTIONAL_QUANTITY` | The conversion is not a whole number of a counted unit (`1.3` crate of 24 is 31.2 bottles). Weighed units accept decimals. |
+
+The same whole-number rule holds for a quantity written in the product's own unit (`0.5` of a
+counted unit is refused), so a preview never accepts what its own commit would refuse.
+
+**`unit_cost` is always per the unit written on the row** — `SKU-008,10,crate,240` says each crate
+cost 240.00, and the layer opens at 24,000 minor per bottle (24000 ÷ 24), which is what the cost per
+base unit has to be for the arithmetic to come out right. `products.cost_minor` is likewise cost per
+base unit and is never divided.
 
 A product that is *inactive* is fine — you may still be opening stock for a discontinued line. A
 product that is **not stock-tracked** (airtime, a service) is an error: it has no quantity to record.
@@ -101,9 +126,10 @@ says how many there are.
       "message": "Opening stock is already recorded for SKU-003 (40 on hand); importing adds 10 more (40 → 50)." }
   ],
   "preview": [
-    { "line": 2, "sku": "SKU-003", "name": "Sugar 1kg", "unit": "ea", "quantity": 40,
-      "onHandBefore": 0, "onHandAfter": 40, "unitCostMinor": 14500,
-      "valueMinor": 580000, "costWasGiven": false }
+    { "line": 2, "sku": "SKU-008", "name": "Soda 300ml", "unit": "ea", "quantity": 240,
+      "enteredUnit": "crate", "enteredQuantity": 10,
+      "onHandBefore": 0, "onHandAfter": 240, "unitCostMinor": 1000,
+      "valueMinor": 240000, "costWasGiven": false }
   ],
   "previewTruncated": false
 }

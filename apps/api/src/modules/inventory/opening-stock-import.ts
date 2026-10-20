@@ -10,6 +10,7 @@
  * Nothing here touches the database, so it is directly unit-testable.
  */
 import { parseMinorInput, roundHalfUp } from '../../domain/pricing';
+import { convertQuantity, UnitKind } from '../../domain/units';
 import { CsvRow, canonicalColumn as canonicalHeader, recordsToCsvRows as recordsToRows } from '../../domain/csv';
 
 /** Canonical column -> the header spellings we accept. A typo must fail loudly, not import zeros. */
@@ -17,6 +18,9 @@ const COLUMN_ALIASES: Record<string, string[]> = {
   sku: ['sku', 'code', 'item_code', 'item'],
   quantity: ['quantity', 'qty', 'on_hand', 'opening_qty', 'opening_quantity', 'count'],
   unit_cost: ['unit_cost', 'cost', 'cost_price', 'buying_price', 'purchase_price', 'opening_cost'],
+  // Optional (item 4.6): the unit each quantity is written in. Omit it and everything is the
+  // product's base unit, exactly as before.
+  unit: ['unit', 'uom', 'unit_of_measure'],
 };
 
 const canonicalColumn = (header: string): string | null => canonicalHeader(header, COLUMN_ALIASES);
@@ -39,8 +43,13 @@ export interface PlannedOpeningRow {
   productId: string;
   sku: string;
   name: string;
+  /** The unit the quantity will be RECORDED in: always the product's base unit (item 4.6). */
   unit: string;
+  /** The quantity in `unit`. The file's own number when no conversion applied, the converted one when it did. */
   quantity: number;
+  /** What the file said, when it named a different unit — null for a row written in the base unit. */
+  enteredUnit: string | null;
+  enteredQuantity: number | null;
   /** Fully resolved: an explicit file cost, or the product's recorded cost when the file omitted it. */
   unitCostMinor: number;
   /** true only when the FILE said the cost — that is what makes `products.cost_minor` worth updating. */
@@ -63,7 +72,17 @@ export interface OpeningStockProduct {
   id: string;
   sku: string;
   name: string;
+  /** The base unit: the only unit this opening stock may be recorded in (item 4.6). */
   unit: string;
+  /**
+   * Kind of that base unit, which decides whether a quantity in it must stay whole — **null when
+   * the unit is not in the shop's unit catalogue**. Null is not the same as `count`: it means the
+   * ledger has no rule for this product, and the rule the ledger has must not be invented here, or
+   * a preview would accept what a commit then refuses (item 4.6).
+   */
+  unitKind: UnitKind | null;
+  /** Pack sizes this product may be written in, keyed by lower-cased unit: 'crate' -> 24. */
+  conversions: Map<string, number>;
   costMinor: number;
   isStockTracked: boolean;
 }
@@ -232,6 +251,70 @@ export function planOpeningStockImport(rows: CsvRow[], reference: OpeningStockRe
       }
     }
 
+    // --- the unit column (item 4.6) ------------------------------------------------------------
+    // A file may say `crate,10` for a product held in `ea`. The conversion happens HERE, in the
+    // planner, so preview shows exactly what a commit will record — and it refuses rather than
+    // rounds: 1.3 crates of 24 is 31.2 bottles, which is not something a shop can receive.
+    let enteredUnit: string | null = null;
+    let enteredQuantity: number | null = null;
+    let conversionFactor = 1;
+    let baseQuantity = quantity;
+    if (rowErrors.length === 0 && product !== null) {
+      const unitText = valueAt(row, 'unit') ?? '';
+      if (unitText.length > 0 && unitText.toLowerCase() !== product.unit.toLowerCase()) {
+        // Checked in the same order the ledger checks them, so a preview refuses for exactly the
+        // reasons its own commit would (item 4.6).
+        if (product.unitKind === null) {
+          fail(
+            'unit',
+            'UNKNOWN_UNIT',
+            `${product.sku} is stocked in "${product.unit}", which is not in this shop's unit catalogue — add it under Units first`,
+          );
+        } else {
+          const factor = product.conversions.get(unitText.toLowerCase());
+          if (factor === undefined) {
+            fail(
+              'unit',
+              'UNKNOWN_CONVERSION',
+              `${product.sku} has no pack size: 1 ${unitText} is not defined as ${product.unit}. Add the conversion under the product first`,
+            );
+          } else {
+            const outcome = convertQuantity({ quantity, fromFactor: factor, toFactor: 1, kind: product.unitKind });
+            if (!outcome.ok) {
+              fail(
+                'unit',
+                outcome.code,
+                outcome.code === 'FRACTIONAL_QUANTITY'
+                  ? `${formatQuantity(quantity)} ${unitText} is not a whole number of ${product.unit}, which is counted rather than weighed`
+                  : `Cannot express ${formatQuantity(quantity)} ${unitText} in ${product.unit}`,
+              );
+            } else {
+              baseQuantity = outcome.quantity;
+              conversionFactor = factor;
+              enteredUnit = unitText;
+              enteredQuantity = quantity;
+            }
+          }
+        }
+      } else if (product.unitKind !== null) {
+        // A quantity written in the BASE unit is held to the base unit's rule too — the server
+        // applies exactly this conversion to it, so `0.5 ea` is refused here as firmly as it is
+        // refused on arrival. When the unit has no kind there is no rule, and none is invented.
+        const identity = convertQuantity({ quantity, fromFactor: 1, toFactor: 1, kind: product.unitKind });
+        if (!identity.ok) {
+          fail(
+            'quantity',
+            identity.code,
+            identity.code === 'FRACTIONAL_QUANTITY'
+              ? `${product.unit} is counted, so a quantity in it must be a whole number — ${formatQuantity(quantity)} is not`
+              : `Cannot accept ${formatQuantity(quantity)} ${product.unit}`,
+          );
+        } else {
+          baseQuantity = identity.quantity;
+        }
+      }
+    }
+
     if (rowErrors.length > 0) {
       errors.push(...rowErrors);
       continue;
@@ -240,6 +323,10 @@ export function planOpeningStockImport(rows: CsvRow[], reference: OpeningStockRe
     if (product === null) continue;
 
     if (!costWasGiven) unitCostMinor = product.costMinor;
+    // A stated cost is per the unit on the paperwork — 24,000 a crate becomes 1,000 a bottle by the
+    // same factor as the quantity. The product's OWN recorded cost is already per base unit and is
+    // therefore left alone; only a cost the file actually quoted travels down the factor.
+    if (costWasGiven && enteredUnit !== null) unitCostMinor = roundHalfUp(unitCostMinor / conversionFactor);
     if (unitCostMinor <= 0) {
       warnings.push({
         line: row.line,
@@ -259,7 +346,7 @@ export function planOpeningStockImport(rows: CsvRow[], reference: OpeningStockRe
         code: 'OPENING_ALREADY_PRESENT',
         message:
           `Opening stock is already recorded for ${product.sku} (${formatQuantity(onHandBefore)} on hand); ` +
-          `importing adds ${formatQuantity(quantity)} more (${formatQuantity(onHandBefore)} → ${formatQuantity(onHandBefore + quantity)}).`,
+          `importing adds ${formatQuantity(baseQuantity)} ${product.unit} more (${formatQuantity(onHandBefore)} → ${formatQuantity(onHandBefore + baseQuantity)}).`,
       });
     }
 
@@ -269,12 +356,14 @@ export function planOpeningStockImport(rows: CsvRow[], reference: OpeningStockRe
       sku: product.sku,
       name: product.name,
       unit: product.unit,
-      quantity,
+      quantity: baseQuantity,
+      enteredUnit,
+      enteredQuantity,
       unitCostMinor,
       costWasGiven,
       onHandBefore,
-      onHandAfter: onHandBefore + quantity,
-      valueMinor: roundHalfUp(quantity * unitCostMinor),
+      onHandAfter: onHandBefore + baseQuantity,
+      valueMinor: roundHalfUp(baseQuantity * unitCostMinor),
     });
   }
 

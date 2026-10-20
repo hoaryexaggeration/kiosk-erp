@@ -87,3 +87,40 @@ export function parseMinorInput(text) {
   const value = Number(whole) * 100 + Number(cents);
   return Number.isSafeInteger(value) ? value : null;
 }
+
+/** Ledger precision: quantities are fixed-point at 3 decimals (numeric(18,3)), never money. */
+export const QUANTITY_DECIMALS = 3;
+export const QUANTITY_SCALE = 10 ** QUANTITY_DECIMALS;
+
+/**
+ * Convert a quantity from one unit of a product into another unit of the same product.
+ *
+ * Item 4.6 — "buying in crates and selling in pieces keeps one stock ledger". Both factors are
+ * expressed RELATIVE TO THE PRODUCT'S BASE UNIT: `fromFactor` is how many base units one `from`
+ * unit contains, `toFactor` how many one `to` unit contains. Selling in pieces and buying in
+ * crates is therefore the same arithmetic in both directions, and there is exactly one place
+ * where a crate becomes 24 pieces.
+ *
+ * Rules:
+ * - the result is rounded half-up to 3 decimals — the ledger's fixed precision (§7's "strictly
+ *   defined fixed-precision decimal strategy" for quantities; money itself stays integer minor units)
+ * - a `count` base unit must stay a WHOLE number: 1.3 crates of 24 is 31.2 bottles, which is not a
+ *   fact anyone can receive, so it is refused rather than rounded to 31 or 31.2
+ * - `weight` and `volume` bases may be fractional (0.5 kg of tomatoes is exactly what was weighed)
+ * - `toFactor`/`fromFactor` must be positive and finite; anything else is refused, never guessed
+ *
+ * @param {{quantity:number, fromFactor:number, toFactor:number, kind?:'count'|'weight'|'volume'}} input
+ * @returns {{ok:true, quantity:number}|{ok:false, code:string}} a failure carries a STABLE code the
+ *   caller turns into a message; messages are not part of the conformance contract.
+ */
+export function convertQuantity(input) {
+  const { quantity, fromFactor, toFactor, kind = 'count' } = input ?? {};
+  if (!Number.isFinite(quantity)) return { ok: false, code: 'INVALID_QUANTITY' };
+  if (!Number.isFinite(fromFactor) || !Number.isFinite(toFactor) || fromFactor <= 0 || toFactor <= 0) {
+    return { ok: false, code: 'INVALID_CONVERSION_FACTOR' };
+  }
+  const scaled = roundHalfUp(((quantity * fromFactor) / toFactor) * QUANTITY_SCALE) / QUANTITY_SCALE;
+  if (!Number.isFinite(scaled)) return { ok: false, code: 'INVALID_QUANTITY' };
+  if (kind === 'count' && scaled !== Math.round(scaled)) return { ok: false, code: 'FRACTIONAL_QUANTITY' };
+  return { ok: true, quantity: scaled };
+}

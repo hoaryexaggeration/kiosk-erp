@@ -3,21 +3,25 @@ package com.kiosk.erp.core.data.repository
 import androidx.room.withTransaction
 import com.kiosk.erp.core.database.BarcodeEntity
 import com.kiosk.erp.core.database.KioskDatabase
+import com.kiosk.erp.core.database.ProductConversionEntity
 import com.kiosk.erp.core.database.ProductEntity
+import com.kiosk.erp.core.network.ServerConversion
 import com.kiosk.erp.core.network.ServerProduct
 import kotlinx.coroutines.flow.Flow
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 
 /**
  * The device's offline catalogue cache. Reads are always served from Room; the network only ever
  * fills the cache (§1.6 rule 1). Tax rates come from the server's tax categories — never a default.
  *
- * Barcodes are cached as a SET. When the server reports a product's barcodes, whatever it reports
- * replaces what is stored for that product, so a barcode removed on the server stops resolving on the
- * device. Only ever adding would leave a deleted tag scannable for ever.
+ * Barcodes and pack sizes are cached as SETs. When the server reports a product's barcodes or
+ * conversions, whatever it reports replaces what is stored for that product, so a tag or a pack size
+ * removed on the server stops resolving on the device. Only ever adding would leave a stale
+ * identifier usable for ever — a scannable barcode, or a receipt in a crate that no longer exists.
  */
 class ProductRepository(private val db: KioskDatabase) {
 
@@ -31,13 +35,23 @@ class ProductRepository(private val db: KioskDatabase) {
     /** The barcodes currently cached for a product (used to seed the editor). */
     suspend fun barcodes(productId: String): List<String> = db.productDao().barcodesFor(productId)
 
+    /**
+     * The pack sizes cached for a product (item 4.6). Seeded into the editor and used to convert an
+     * adjustment in packs without a round-trip, so the operator sees the base quantity they are about
+     * to queue before they queue it.
+     */
+    suspend fun conversions(productId: String): List<ProductConversionEntity> = db.productDao().conversionsFor(productId)
+
     /** Resolve a scanned/manual barcode from the LOCAL cache only — scanning never needs a network. */
     suspend fun findByBarcode(code: String): ProductEntity? = db.productDao().byBarcode(code.trim())
 
     suspend fun refreshProducts(products: List<ServerProduct>) {
         db.withTransaction {
             db.productDao().upsertAll(products.map { it.toEntity() })
-            for (p in products) replaceBarcodes(p.id, p.barcodes)
+            for (p in products) {
+                replaceBarcodes(p.id, p.barcodes)
+                replaceConversions(p.id, p.conversions)
+            }
         }
     }
 
@@ -46,6 +60,7 @@ class ProductRepository(private val db: KioskDatabase) {
         db.withTransaction {
             db.productDao().upsertAll(listOf(product.toEntity()))
             replaceBarcodes(product.id, product.barcodes)
+            replaceConversions(product.id, product.conversions)
         }
     }
 
@@ -55,6 +70,12 @@ class ProductRepository(private val db: KioskDatabase) {
         val sku = obj["sku"]?.jsonPrimitive?.content ?: return
         val name = obj["name"]?.jsonPrimitive?.content ?: return
         val barcodes = obj["barcodes"]?.jsonArray?.mapNotNull { it.jsonPrimitive.contentOrNull } ?: emptyList()
+        val conversions = obj["conversions"]?.jsonArray?.mapNotNull { element ->
+            val conversion = element.jsonObject
+            val unit = conversion["unit"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+            val factor = conversion["factor"]?.jsonPrimitive?.content?.toDoubleOrNull() ?: return@mapNotNull null
+            ServerConversion(unit = unit, factor = factor)
+        } ?: emptyList()
         db.withTransaction {
             db.productDao().upsertAll(
                 listOf(
@@ -73,11 +94,15 @@ class ProductRepository(private val db: KioskDatabase) {
                         description = obj["description"]?.jsonPrimitive?.contentOrNull,
                         categoryId = obj["category_id"]?.jsonPrimitive?.contentOrNull,
                         taxCategoryId = obj["tax_category_id"]?.jsonPrimitive?.contentOrNull,
+                        brandId = obj["brand_id"]?.jsonPrimitive?.contentOrNull,
+                        brandName = obj["brand_name"]?.jsonPrimitive?.contentOrNull,
+                        unitKind = obj["unit_kind"]?.jsonPrimitive?.contentOrNull,
                         isActive = obj["is_active"]?.jsonPrimitive?.content?.toBooleanStrictOrNull() ?: true,
                     ),
                 ),
             )
             replaceBarcodes(id, barcodes)
+            replaceConversions(id, conversions)
         }
     }
 
@@ -86,6 +111,16 @@ class ProductRepository(private val db: KioskDatabase) {
         db.productDao().deleteBarcodesFor(productId)
         if (barcodes.isNotEmpty()) {
             db.productDao().upsertBarcodes(barcodes.map { BarcodeEntity(barcode = it, productId = productId) })
+        }
+    }
+
+    /** Same SET rule as barcodes: a pack size the server no longer reports stops converting here. */
+    private suspend fun replaceConversions(productId: String, conversions: List<ServerConversion>) {
+        db.productDao().deleteConversionsFor(productId)
+        if (conversions.isNotEmpty()) {
+            db.productDao().upsertConversions(
+                conversions.map { ProductConversionEntity(productId = productId, unit = it.unit, factor = it.factor) },
+            )
         }
     }
 
@@ -104,6 +139,9 @@ class ProductRepository(private val db: KioskDatabase) {
         description = description,
         categoryId = categoryId,
         taxCategoryId = taxCategoryId,
+        brandId = brandId,
+        brandName = brandName,
+        unitKind = unitKind,
         isActive = isActive,
     )
 }

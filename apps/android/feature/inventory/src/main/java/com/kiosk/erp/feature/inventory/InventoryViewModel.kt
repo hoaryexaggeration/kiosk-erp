@@ -3,9 +3,11 @@ package com.kiosk.erp.feature.inventory
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.kiosk.erp.core.common.Pricing
+import com.kiosk.erp.core.common.Units
 import com.kiosk.erp.core.data.repository.InventoryRepository
 import com.kiosk.erp.core.data.repository.ProductRepository
 import com.kiosk.erp.core.data.session.SessionStore
+import com.kiosk.erp.core.database.ProductConversionEntity
 import com.kiosk.erp.core.database.ProductEntity
 import com.kiosk.erp.core.database.StockBalanceEntity
 import com.kiosk.erp.core.network.ApiClient
@@ -50,7 +52,7 @@ data class OpeningImportState(
 
 class InventoryViewModel(
     private val inventoryRepository: InventoryRepository,
-    productRepository: ProductRepository,
+    private val productRepository: ProductRepository,
     private val api: ApiClient,
     private val sessionStore: SessionStore,
 ) : ViewModel() {
@@ -83,10 +85,27 @@ class InventoryViewModel(
     }
 
     /** Queue an adjustment offline. Reason is required; the movement posts on the next sync. */
-    fun adjust(product: ProductEntity, quantityDelta: Double, reason: String) {
+    private val _adjustPacks = MutableStateFlow<List<ProductConversionEntity>>(emptyList())
+
+    /**
+     * Pack sizes of the product the adjustment dialog is open on (item 4.6). Empty means the product
+     * has none — the dialog then offers its base unit only, the one unit the ledger actually holds.
+     */
+    val adjustPacks: StateFlow<List<ProductConversionEntity>> = _adjustPacks.asStateFlow()
+
+    /**
+     * Queue a stock adjustment in the unit the operator actually used (item 4.6).
+     *
+     * The division of labour is deliberate: the screen converts for the PREVIEW using the same
+     * reference implementation the server posts with, and the command carries what was typed
+     * (`-4 crate`), so the server does the conversion itself and remembers both numbers on the
+     * movement. `baseQuantity` is only the device's projection of the effect — a hint for the cached
+     * on-hand until the next pull, never the authority (§6).
+     */
+    fun adjust(product: ProductEntity, enteredQuantity: Double, unit: String?, baseQuantity: Double, reason: String) {
         viewModelScope.launch {
-            if (quantityDelta == 0.0) {
-                _message.value = "Enter a non-zero quantity delta"
+            if (enteredQuantity == 0.0) {
+                _message.value = "Enter a non-zero quantity change"
                 return@launch
             }
             if (reason.isBlank()) {
@@ -96,8 +115,36 @@ class InventoryViewModel(
             val session = sessionStore.current()
             val branchId = session.branchId ?: "22222222-2222-4222-8222-222222222222"
             val deviceId = session.deviceId ?: "00000000-0000-4000-8000-000000000000"
-            inventoryRepository.createAdjustment(product.id, product.sku, product.name, quantityDelta, reason.trim(), branchId, deviceId)
-            _message.value = "Queued ${if (quantityDelta > 0) "+" else ""}$quantityDelta ${product.sku} • waiting to sync"
+            inventoryRepository.createAdjustment(
+                productId = product.id,
+                sku = product.sku,
+                name = product.name,
+                enteredQuantityDelta = enteredQuantity,
+                unit = unit,
+                baseQuantityDelta = baseQuantity,
+                reason = reason.trim(),
+                branchId = branchId,
+                deviceId = deviceId,
+            )
+            val typed = (if (enteredQuantity > 0) "+" else "") + Units.formatQuantity(enteredQuantity) + (unit?.let { " $it" } ?: "")
+            _message.value = if (unit == null) {
+                "Queued $typed ${product.sku} • waiting to sync"
+            } else {
+                // Both numbers are true and both are useful: what was counted at the shelf, and what
+                // the ledger will hold once the server has done the same sum.
+                "Queued $typed ${product.sku} (${"+"}${Units.formatQuantity(baseQuantity)} ${product.unit}) • waiting to sync"
+            }
+        }
+    }
+
+    /**
+     * The pack sizes of the product being adjusted, read from Room so the dialog offers them while
+     * the shop is offline. Refreshed on every open rather than held, because a pack retired on the
+     * server must not be offered here either (item 4.6).
+     */
+    fun beginAdjust(product: ProductEntity) {
+        viewModelScope.launch {
+            _adjustPacks.value = productRepository.conversions(product.id)
         }
     }
 

@@ -24,10 +24,10 @@ Status key: ✅ present · 🟡 partial · ❌ absent.
 | Phase | Theme | Status | Summary |
 |---|---|---|---|
 | 0 | Discovery, workflow mapping, compliance | 🟡 | `docs/product/phase-0-discovery.md` written; owner sign-off and the §18 decision register are outstanding |
-| 1 | Domain contracts, data model, sync spec | 🟡 | Fixtures, sync protocol, posting matrix, ADRs exist; **no OpenAPI skeleton, no ERD, no state machines beyond `Sale`, no event-version policy, no UoM/unit-conversion spec** |
+| 1 | Domain contracts, data model, sync spec | 🟡 | Fixtures, sync protocol, posting matrix, ADRs, UoM/pack-size contract (`units-and-conversions.md`) exist; **no OpenAPI skeleton, no ERD, no state machines beyond `Sale`, no event-version policy** |
 | 2 | Backend foundation and cloud controls | 🟡 | NestJS + Postgres + auth/RBAC + devices + licensing + outbox work; **no CI, no staging deploy, no backups/restore drill, no OpenAPI generation, no rate limits, `LicenseBillingModule` absent** |
 | 3 | Native shell, local DB, sync center | 🟡 | Shell, Room, push/pull, Sync Center, enrolment work; **`LicenseManager` request export (`.licreq`/QR), entitlement display, Keystore installation key, replay/rollback detection, app lock/offline expiry absent** |
-| 4 | Catalogue, pricing, inventory ledger | 🟡 | Products/barcodes/tax/categories/promotions + movement ledger + balances work; **no product management UI, no bulk import, no UoM/conversions/variants/brands, no price lists/scheduled prices, no transfers, no stocktake, no low-stock thresholds, no movement history UI, no opening-stock import** |
+| 4 | Catalogue, pricing, inventory ledger | 🟡 | Products/barcodes/tax/categories/promotions + movement ledger + balances work; product CRUD UI, category/units/brands/tax management, bulk import, opening-stock import and movement history UI all in; units + pack conversions + brands now hold one base-unit ledger; **no price lists/scheduled prices, no transfers, no stocktake, no low-stock thresholds, no variants, no supplier product codes** |
 | 5 | Offline POS vertical slice | 🟡 | Search, scan, cart, offline cash sale, outbox, idempotent posting work; **no cashier session/role gate, no discounts UI, no price override, no customer on sale, no split tender, no hold/resume, no void, no receipt rendering/printing, no sales-history screen** |
 | 6 | Cash, shifts, refunds, end-of-day | ❌ | `cash_sessions`/`cash_movements` tables only; no float, count, variance, approval, shift close, returns/refunds/exchange |
 | 7 | Customers, suppliers, debtors, creditors | ❌ | `customers`/`suppliers`/`customer_ledger_entries` tables only; no modules, no UI, no credit policy |
@@ -113,7 +113,11 @@ must be completed when its target phase is reached.
 | D1 | Product/category/tax **management UI** (server CRUD exists) | §3.C, §15 Ph4 | 4 ✔ | ✔ |
 | D2 | Bulk product import with preview/validation/error report (`POST /v1/products/import`) | §9, §15 Ph4 | 4 | ✔ |
 | D3 | Opening-stock import workflow (seeded opening stock with FIFO layers exists) | §15 Ph4 | 4 | ◐ |
-| D4 | Units of measure + conversions, variants, brands, supplier product codes | §3.C | 4 | ☐ |
+| D4 | Units of measure + conversions, variants, brands, supplier product codes — **split below into D4a–D4d** (owner decision: 4.6 = units + brands only) | §3.C | 4 | ◐ |
+| D4a | Units of measure + product pack conversions (`units_of_measure`, `unit_conversions`) | §3.C | 4 | ✔ |
+| D4b | Brands (`brands`, `products.brand_id`) | §3.C | 4 | ✔ |
+| D4c | Supplier product codes on the catalogue — needs the Supplier module, so it lands with it | §3.C | 7 | ☐ |
+| D4d | Product **variants** (size/flavour/colour as distinct sellable items) — needs its own exit criterion agreed **before Phase 5 starts**, because variants change what the till resolves a barcode to | §3.C | 4 (before Ph5) | ☐ |
 | D5 | Price lists, branch/customer/scheduled prices, price-change history | §3.C | 4 | ☐ |
 | D6 | Stock transfers with dispatch/receipt states | §3.D, §15 Ph4 | 4 | ☐ |
 | D7 | Stocktake / cycle count | §3.D, §15 Ph4 | 4 | ☐ |
@@ -162,7 +166,7 @@ each later phase is expanded to the same granularity as it becomes current.
 | 4.3 ✔ | Category + tax-category management UI | Done: "Categories & tax" screen in `feature:catalog`; rate entered as a percentage, stored exactly in basis points |
 | 4.4 ✔ | Bulk import: CSV/JSON upload → **preview → validation → per-row error report → commit** (D2) | Done: `POST /v1/products/import` (preview/commit share one planner, all-or-nothing) + device file picker with the server-validated preview; 18 unit + 8 endpoint tests |
 | 4.5 ✔ | Opening stock import (D3) | Done: `POST /v1/inventory/opening-stock/import` — preview/commit share one pure planner, all-or-nothing, report carries `onHandBefore/After` + three warnings; commit appends `opening_stock` movements that open FIFO layers; `requestId` makes a retried commit idempotent; Stock tab gains an Opening stock screen (file picker or typed lines); 16 unit + 11 endpoint tests |
-| 4.6 | Units of measure + conversions (D4) | Buying in crates and selling in pieces keeps one stock ledger |
+| 4.6 ✔ | Units of measure + pack conversions + brands (D4a, D4b) | Done: `units_of_measure` (`kind` = count/weight/volume — the rule, not a label), product-scoped `unit_conversions` as a SET (factor = base units per 1 of the pack), `brands` + `products.brand_id`; `InventoryService.resolveQuantity` is the single conversion point, so a movement is always recorded in `products.unit` and remembers `entered_unit`/`entered_quantity`; receipts, adjustments and opening import all convert, quoted costs divide to cost-per-base, overrides are measured in base; `unit_kind` rides the product payload so a device converts offline; device: Room v4 (brand, conversions, unitKind), product editor pack sizes + brand + unit picker, Manage gains Units & Brands, stock adjust dialog picks a pack and previews `10 crate = 240 ea` with the server's own reference implementation, history shows `10 crate → +240 ea`; 74/74 fixtures + 127/127 API tests; `units-and-conversions.md` |
 | 4.7 | Cross-branch stock transfers with dispatch/receipt/discrepancy states (D6, ADR 0008) | Stock is in exactly one branch or in transit, never both |
 | 4.8 | Stocktake / cycle count (D7) | A count produces adjustment movements with reason and actor |
 | 4.9 | Low-stock thresholds and alerts (D8) | Threshold breach is visible on the Stock screen |
@@ -265,6 +269,51 @@ sum of its movements, so there is no code path in the import that writes a quant
   *Import N line(s)*. On success the balances are refetched so the Stock list shows the new on-hand,
   and a replayed commit says *already imported* rather than *imported*.
 - Documented in `docs/operations/opening-stock-import.md`; 16 planner unit tests + 11 endpoint tests.
+
+#### Units, pack sizes and brands (v0.4.6, item 4.6)
+
+The exit criterion is one sentence: **a shop buys in crates and sells in pieces without splitting
+its stock book.** Stock is held in exactly one unit per product (`products.unit`); every other unit a
+quantity may be *written* in is a conversion **into** it, and `1 crate = 24` is a fact about soda (12
+for water), so pack sizes are product-scoped rows, not unit rows.
+
+- **`kind` is the rule, not a label.** `count` means a converted quantity must come out whole —
+  `1.3` crates of 24 is `31.2` bottles, and that is refused rather than rounded — while `weight` and
+  `volume` accept fractions because a scale does not care. Factors are always relative to the base
+  unit and must be finite and greater than zero; a pack may not convert a unit into itself.
+- **One conversion point.** `InventoryService.resolveQuantity` resolves a quantity before anything is
+  written, and `applyMovement` is the single write path behind it, so there is no code path that can
+  record stock in a unit other than the product's. A movement that *was* converted remembers
+  `entered_unit` / `entered_quantity` (paired nulls by CHECK); one written in the base unit carries no
+  phantom pair. Receipts and adjustments resolve every line first, so one unknown pack refuses the
+  whole command with nothing received, and a supervisor override is measured against the **base**
+  quantity — 48 bottles, not 4 crates.
+- **Costs divide, stock costs never do.** A quoted `unitCostMinor` is per the unit on the paperwork and
+  is divided by the factor into cost-per-base before it opens a FIFO layer or updates
+  `products.cost_minor`; `10 crate @ 24000` therefore opens one layer at 24,000 a bottle.
+- **The base-unit rule, and no invented rules.** A quantity typed in the product's own unit is held to
+  the same rule (`0.5 ea` refused), which the opening-stock planner mirrors so a preview never accepts
+  what its commit then refuses. Where a unit's kind is unknown the ledger reports `unit_kind: null`
+  and applies **no** rule — falling back to `count` would refuse a legal weigh for a product whose unit
+  nobody had added to the vocabulary, with a message about whole kilos.
+- **Configuration, not events.** Units and brands are CRUD endpoints plus `units`/`brands` on the
+  config snapshot; they ride on the product payload (`brand_id`, `brand_name`, `unit_kind`,
+  `conversions[]`) rather than as server events, because they travel with the product that needs them
+  and a device must be able to convert offline on the same pull that brings the factors (§6).
+- **Device**: Room v4 (brand, `unitKind`, a `product_conversions` table replaced wholesale like
+  barcodes), pack sizes and a brand and unit picker in the product editor, **Manage** gains Units &
+  Brands (a kind is chosen, never typed), the adjust dialog offers the product's packs from Room and
+  previews `10 crate = 240 ea` with the very `Units.convertQuantity` the server posts with — blocking
+  an impossible conversion with the reason instead of queueing a command that would come back
+  rejected — and history reads `10 crate → +240 ea`.
+- **Conversions as one contract across languages**: `domain/units.ts`, `Units.kt` and `Units.swift`
+  round half-up to 3 decimals and refuse a non-whole count with a **code**, never a message (whoever
+  displays it writes the sentence). Vectors in `fixtures/unit-conversion.json` — 74/74 checks.
+- **Scope agreed with the owner for 4.6**: units + brands only. Supplier product codes moved to
+  Phase 7 (they need the supplier module) and variants stay as their own deferred row (D4d) needing
+  an exit criterion before Phase 5 starts.
+- Documented in `docs/operations/units-and-conversions.md`; 20 tests in `units-conversions.spec.ts`
+  plus import and planner cases for the new columns.
 
 ### Phase 5 — Offline POS vertical slice (current phase)
 

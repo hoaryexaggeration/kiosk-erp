@@ -14,6 +14,7 @@ const reference = (overrides: Partial<ImportReferenceData> = {}): ImportReferenc
   barcodeOwner: new Map(),
   taxCategoriesByName: new Map([['vat 16% (inclusive)', { id: 'tax-1', name: 'VAT 16% (inclusive)' }]]),
   categoriesByName: new Map([['drinks', { id: 'cat-1', name: 'Drinks' }]]),
+  brandsByName: new Map([['kaskazi drinks', { id: 'brand-1', name: 'Kaskazi Drinks' }]]),
   ...overrides,
 });
 
@@ -60,7 +61,7 @@ describe('product import planning', () => {
     const plan = planProductImport(
       rows([FULL_HEADER, ['SKU-100', 'Bread 400g', '65', 'drinks', 'VAT 16% (inclusive)', 'ea', '45', '6001000000011|6001000000028']]),
       reference(),
-      { createMissingCategories: false },
+      { createMissingCategories: false, createMissingBrands: false },
     );
     expect(plan.errors).toEqual([]);
     expect(plan.createCount).toBe(1);
@@ -77,13 +78,13 @@ describe('product import planning', () => {
   });
 
   it('proves the money parser is in the import path: 1.15 must not lose a cent', () => {
-    const plan = planProductImport(rows([HEADER, ['S', 'N', '1.15']]), reference(), { createMissingCategories: false });
+    const plan = planProductImport(rows([HEADER, ['S', 'N', '1.15']]), reference(), { createMissingCategories: false, createMissingBrands: false });
     expect(plan.errors).toEqual([]);
     expect(plan.rows[0].priceMinor).toBe(115);
   });
 
   it('rejects an unknown column instead of importing a price of zero', () => {
-    const plan = planProductImport(rows([['sku', 'name', 'prise'], ['S', 'N', '65']]), reference(), { createMissingCategories: false });
+    const plan = planProductImport(rows([['sku', 'name', 'prise'], ['S', 'N', '65']]), reference(), { createMissingCategories: false, createMissingBrands: false });
     expect(plan.rows).toEqual([]);
     expect(plan.errors.map((e) => e.code)).toEqual(expect.arrayContaining(['UNKNOWN_COLUMN', 'MISSING_COLUMN']));
   });
@@ -98,7 +99,7 @@ describe('product import planning', () => {
         ['SKU-4', 'No price', ''],
       ]),
       reference(),
-      { createMissingCategories: false },
+      { createMissingCategories: false, createMissingBrands: false },
     );
     expect(plan.errors.map((e) => [e.line, e.code])).toEqual([
       [3, 'MISSING_NAME'],
@@ -112,7 +113,7 @@ describe('product import planning', () => {
     const plan = planProductImport(
       rows([['sku', 'name', 'price', 'category', 'tax'], ['S', 'N', '10', '', 'VAT 8%']]),
       reference(),
-      { createMissingCategories: false },
+      { createMissingCategories: false, createMissingBrands: false },
     );
     expect(plan.rows).toEqual([]);
     expect(plan.errors[0].code).toBe('UNKNOWN_TAX');
@@ -121,21 +122,50 @@ describe('product import planning', () => {
 
   it('only creates a missing category when asked, and never creates a tax rate', () => {
     const categoryHeader = ['sku', 'name', 'price', 'category'];
-    const strict = planProductImport(rows([categoryHeader, ['S', 'N', '10', 'New Aisle']]), reference(), { createMissingCategories: false });
+    const strict = planProductImport(rows([categoryHeader, ['S', 'N', '10', 'New Aisle']]), reference(), { createMissingCategories: false, createMissingBrands: false });
     expect(strict.errors[0].code).toBe('UNKNOWN_CATEGORY');
     expect(strict.categoriesToCreate).toEqual([]);
 
     const lenient = planProductImport(
       rows([categoryHeader, ['S', 'N', '10', 'New Aisle'], ['T', 'N', '10', 'New Aisle']]),
       reference(),
-      { createMissingCategories: true },
+      { createMissingCategories: true, createMissingBrands: false },
     );
     expect(lenient.errors).toEqual([]);
     expect(lenient.categoriesToCreate).toEqual(['New Aisle']);
   });
 
+  it('carries a known brand through to the planned row, by the name the file wrote', () => {
+    const plan = planProductImport(
+      rows([['sku', 'name', 'price', 'brand'], ['SKU-1', 'Soda 300ml', '8', 'Kaskazi Drinks'], ['SKU-2', 'Bread', '65', '']]),
+      reference(),
+      { createMissingCategories: false, createMissingBrands: false },
+    );
+    expect(plan.errors).toEqual([]);
+    expect(plan.rows.map((row) => row.brandName)).toEqual(['Kaskazi Drinks', null]);
+    expect(plan.brandsToCreate).toEqual([]);
+  });
+
+  it('creates a missing brand only when asked — a label is not a licence to invent one', () => {
+    const header = ['sku', 'name', 'price', 'brand'];
+    const strict = planProductImport(rows([header, ['S', 'N', '10', 'New Drinks']]), reference(), {
+      createMissingCategories: false,
+      createMissingBrands: false,
+    });
+    expect(strict.errors[0]).toMatchObject({ code: 'UNKNOWN_BRAND', field: 'brand' });
+    expect(strict.brandsToCreate).toEqual([]);
+
+    const lenient = planProductImport(
+      rows([header, ['S', 'N', '10', 'New Drinks'], ['T', 'N', '10', 'New Drinks']]),
+      reference(),
+      { createMissingCategories: false, createMissingBrands: true },
+    );
+    expect(lenient.errors).toEqual([]);
+    expect(lenient.brandsToCreate).toEqual(['New Drinks']);
+  });
+
   it('catches a repeated SKU inside the file and points at the earlier line', () => {
-    const plan = planProductImport(rows([HEADER, ['SKU-1', 'A', '10'], ['sku-1', 'B', '20']]), reference(), { createMissingCategories: false });
+    const plan = planProductImport(rows([HEADER, ['SKU-1', 'A', '10'], ['sku-1', 'B', '20']]), reference(), { createMissingCategories: false, createMissingBrands: false });
     expect(plan.rows).toHaveLength(1);
     expect(plan.errors[0]).toMatchObject({ line: 3, code: 'DUPLICATE_SKU_IN_FILE' });
     expect(plan.errors[0].message).toContain('line 2');
@@ -150,7 +180,7 @@ describe('product import planning', () => {
         ['C', 'C', '10', '', '', '', '', '999'],
       ]),
       reference({ barcodeOwner: new Map([['999', 'other-product']]) }),
-      { createMissingCategories: false },
+      { createMissingCategories: false, createMissingBrands: false },
     );
     expect(plan.errors.map((e) => e.code)).toEqual(['DUPLICATE_BARCODE_IN_FILE', 'DUPLICATE_BARCODE']);
   });
@@ -159,7 +189,7 @@ describe('product import planning', () => {
     const plan = planProductImport(
       rows([FULL_HEADER, ['SKU-1', 'A', '10', '', '', '', '', '111']]),
       reference({ productIdBySku: new Map([['sku-1', 'prod-1']]), barcodeOwner: new Map([['111', 'prod-1']]) }),
-      { createMissingCategories: false },
+      { createMissingCategories: false, createMissingBrands: false },
     );
     expect(plan.errors).toEqual([]);
     expect(plan.rows[0]).toMatchObject({ action: 'update', productId: 'prod-1' });
@@ -169,7 +199,7 @@ describe('product import planning', () => {
     const plan = planProductImport(
       rows([HEADER, ['SKU-1', 'A', '10']]),
       reference({ productIdBySku: new Map([['sku-1', 'prod-1']]) }),
-      { createMissingCategories: false },
+      { createMissingCategories: false, createMissingBrands: false },
     );
     expect(plan.rows[0].barcodes).toBeNull();
   });
@@ -178,34 +208,35 @@ describe('product import planning', () => {
     const plan = planProductImport(
       rows([HEADER, ['SKU-1', 'A', '10']]),
       reference({ ambiguousSkus: new Set(['sku-1']) }),
-      { createMissingCategories: false },
+      { createMissingCategories: false, createMissingBrands: false },
     );
     expect(plan.rows).toEqual([]);
     expect(plan.errors[0].code).toBe('AMBIGUOUS_SKU');
   });
 
   it('rejects a row wider than the header rather than shifting its values', () => {
-    const plan = planProductImport(rows([HEADER, ['SKU-1', 'A', '10', 'extra']]), reference(), { createMissingCategories: false });
+    const plan = planProductImport(rows([HEADER, ['SKU-1', 'A', '10', 'extra']]), reference(), { createMissingCategories: false, createMissingBrands: false });
     expect(plan.rows).toEqual([]);
     expect(plan.errors[0].code).toBe('RAGGED_ROW');
   });
 
   it('reports an empty file and a header-only file', () => {
-    expect(planProductImport([], reference(), { createMissingCategories: false }).errors[0].code).toBe('EMPTY_FILE');
-    expect(planProductImport(rows([HEADER]), reference(), { createMissingCategories: false }).errors[0].code).toBe('EMPTY_FILE');
+    expect(planProductImport([], reference(), { createMissingCategories: false, createMissingBrands: false }).errors[0].code).toBe('EMPTY_FILE');
+    expect(planProductImport(rows([HEADER]), reference(), { createMissingCategories: false, createMissingBrands: false }).errors[0].code).toBe('EMPTY_FILE');
   });
 
   it('accepts yes/no for booleans and rejects anything else', () => {
     const ok = planProductImport(
       rows([['sku', 'name', 'price', 'stock_tracked', 'active'], ['S', 'N', '10', 'no', 'yes']]),
       reference(),
-      { createMissingCategories: false },
+      { createMissingCategories: false, createMissingBrands: false },
     );
     expect(ok.errors).toEqual([]);
     expect(ok.rows[0]).toMatchObject({ isStockTracked: false, isActive: true });
 
     const bad = planProductImport(rows([['sku', 'name', 'price', 'active'], ['S', 'N', '10', 'maybe']]), reference(), {
       createMissingCategories: false,
+      createMissingBrands: false,
     });
     expect(bad.errors[0].code).toBe('INVALID_BOOLEAN');
   });

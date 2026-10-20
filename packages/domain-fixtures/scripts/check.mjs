@@ -7,7 +7,7 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { computeLine, computeDocument, evaluateCredit, canTransition, parseMinorInput } from '../src/index.mjs';
+import { computeLine, computeDocument, evaluateCredit, canTransition, parseMinorInput, convertQuantity } from '../src/index.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const fixtures = join(here, '..', 'fixtures');
@@ -41,6 +41,18 @@ for (const d of pricing.documents) {
 for (const c of pricing.parsing ?? []) {
   check(`parsing:${c.id}`, parseMinorInput(c.input), c.expected);
 }
+
+// --- unit conversion (item 4.6) -----------------------------------------
+// One stock ledger across pack sizes: a count base must stay whole, weight/volume need not.
+const units = JSON.parse(readFileSync(join(fixtures, 'unit-conversion.json'), 'utf8'));
+for (const c of units.cases) {
+  check(`unit:${c.id}`, convertQuantity(c.input), c.expected);
+}
+// A non-finite quantity cannot be expressed in JSON, so it is asserted directly against the reference.
+check('unit:quantity-not-finite', convertQuantity({ quantity: Number.NaN, fromFactor: 1, toFactor: 1 }), {
+  ok: false,
+  code: 'INVALID_QUANTITY',
+});
 
 // --- credit exposure -----------------------------------------------------
 const credit = JSON.parse(readFileSync(join(fixtures, 'credit-exposure.json'), 'utf8'));

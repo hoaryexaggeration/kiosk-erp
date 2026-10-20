@@ -1,0 +1,31 @@
+{
+  "$comment": "Item 4.6 — units of measure and conversions. Both factors are relative to the product's BASE unit: factor = how many base units one of that unit contains (1 crate = 24 ea -> crate factor 24, ea factor 1). A count base must stay whole; weight/volume bases may be fractional. Results are fixed-point at 3 decimals, rounded half-up.",
+  "schemaVersion": 1,
+  "quantityDecimals": 3,
+  "cases": [
+    { "id": "crate-10-to-ea", "input": { "quantity": 10, "fromFactor": 24, "toFactor": 1, "kind": "count" }, "expected": { "ok": true, "quantity": 240 } },
+    { "id": "crate-1-5-to-ea", "input": { "quantity": 1.5, "fromFactor": 24, "toFactor": 1, "kind": "count" }, "expected": { "ok": true, "quantity": 36 } },
+    { "id": "crate-1-3-rejected", "input": { "quantity": 1.3, "fromFactor": 24, "toFactor": 1, "kind": "count" }, "expected": { "ok": false, "code": "FRACTIONAL_QUANTITY" } },
+    { "id": "identity-ea", "input": { "quantity": 7, "fromFactor": 1, "toFactor": 1, "kind": "count" }, "expected": { "ok": true, "quantity": 7 } },
+    { "id": "identity-decimal-rejected", "input": { "quantity": 7.5, "fromFactor": 1, "toFactor": 1, "kind": "count" }, "expected": { "ok": false, "code": "FRACTIONAL_QUANTITY" } },
+    { "id": "pack-3-to-ea", "input": { "quantity": 3, "fromFactor": 6, "toFactor": 1, "kind": "count" }, "expected": { "ok": true, "quantity": 18 } },
+    { "id": "ea-48-to-crate", "input": { "quantity": 48, "fromFactor": 1, "toFactor": 24, "kind": "count" }, "expected": { "ok": true, "quantity": 2 } },
+    { "id": "crate-4-to-pack", "input": { "quantity": 4, "fromFactor": 24, "toFactor": 6, "kind": "count" }, "expected": { "ok": true, "quantity": 16 } },
+    { "id": "crate-negative-2", "input": { "quantity": -2, "fromFactor": 24, "toFactor": 1, "kind": "count" }, "expected": { "ok": true, "quantity": -48 } },
+    { "id": "zero-is-zero", "input": { "quantity": 0, "fromFactor": 24, "toFactor": 1, "kind": "count" }, "expected": { "ok": true, "quantity": 0 } },
+    { "id": "half-item-rejected", "input": { "quantity": 0.5, "fromFactor": 1, "toFactor": 2, "kind": "count" }, "expected": { "ok": false, "code": "FRACTIONAL_QUANTITY" } },
+    { "id": "factor-zero", "input": { "quantity": 1, "fromFactor": 0, "toFactor": 1, "kind": "count" }, "expected": { "ok": false, "code": "INVALID_CONVERSION_FACTOR" } },
+    { "id": "factor-negative", "input": { "quantity": 1, "fromFactor": 24, "toFactor": -1, "kind": "count" }, "expected": { "ok": false, "code": "INVALID_CONVERSION_FACTOR" } },
+    { "id": "kind-defaults-to-count", "input": { "quantity": 1.5, "fromFactor": 1, "toFactor": 1 }, "expected": { "ok": false, "code": "FRACTIONAL_QUANTITY" } },
+    { "id": "g-500-to-kg", "input": { "quantity": 500, "fromFactor": 0.001, "toFactor": 1, "kind": "weight" }, "expected": { "ok": true, "quantity": 0.5 } },
+    { "id": "kg-1-to-g", "input": { "quantity": 1, "fromFactor": 1, "toFactor": 0.001, "kind": "weight" }, "expected": { "ok": true, "quantity": 1000 } },
+    { "id": "kg-slice-of-a-bag", "input": { "quantity": 1, "fromFactor": 1, "toFactor": 1000, "kind": "weight" }, "expected": { "ok": true, "quantity": 0.001 } },
+    { "id": "weight-fraction-allowed", "input": { "quantity": 0.5, "fromFactor": 1, "toFactor": 1, "kind": "weight" }, "expected": { "ok": true, "quantity": 0.5 } },
+    { "id": "exact-half-division", "input": { "quantity": 1.5, "fromFactor": 1, "toFactor": 2, "kind": "weight" }, "expected": { "ok": true, "quantity": 0.75 } },
+    { "id": "half-gram-rounds-up", "input": { "quantity": 0.0005, "fromFactor": 1, "toFactor": 1, "kind": "weight" }, "expected": { "ok": true, "quantity": 0.001 } },
+    { "id": "ml-2750-to-l", "input": { "quantity": 2750, "fromFactor": 0.001, "toFactor": 1, "kind": "volume" }, "expected": { "ok": true, "quantity": 2.75 } },
+    { "id": "identity-with-equal-factors", "input": { "quantity": 1, "fromFactor": 0.001, "toFactor": 0.001, "kind": "weight" }, "expected": { "ok": true, "quantity": 1 } },
+    { "id": "crate-to-crate", "input": { "quantity": 3, "fromFactor": 24, "toFactor": 24, "kind": "count" }, "expected": { "ok": true, "quantity": 3 } },
+    { "id": "crate-roundtrip", "input": { "quantity": 72, "fromFactor": 24, "toFactor": 24, "kind": "count" }, "expected": { "ok": true, "quantity": 72 } }
+  ]
+}

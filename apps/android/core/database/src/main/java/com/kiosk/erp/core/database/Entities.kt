@@ -21,6 +21,17 @@ data class ProductEntity(
     val description: String? = null,
     val categoryId: String? = null,
     val taxCategoryId: String? = null,
+    /** Brand (item 4.6). `brandName` is denormalised so a list can show it without a join. */
+    val brandId: String? = null,
+    val brandName: String? = null,
+    /**
+     * The `kind` of the base unit (`count`, `weight` or `volume`), or null when that unit is not in
+     * the shop's vocabulary. It travels with the product because it belongs to the product's
+     * conversions: a crate count must land on a whole number, a weigh may not — and a product can
+     * only HAVE pack sizes if its base unit is a typed one, so this is exactly where the rule is
+     * needed, available offline on the same pull that brings the pack sizes themselves.
+     */
+    val unitKind: String? = null,
     val isActive: Boolean = true,
 )
 
@@ -28,6 +39,21 @@ data class ProductEntity(
 data class BarcodeEntity(
     @PrimaryKey val barcode: String,
     val productId: String,
+)
+
+/**
+ * A product's pack sizes (item 4.6): `1 <unit> = <factor> <product.unit>`. Stored as a SET keyed by
+ * product and unit, replaced wholesale from the server like barcodes — a pack size retired on the
+ * server must stop converting on the device too, because the receipt it validates is posted there.
+ *
+ * `factor` is against the product's base unit, which is why this table hangs off the product and not
+ * off the unit: a crate is 24 bottles of soda and 12 of water.
+ */
+@Entity(tableName = "product_conversions", primaryKeys = ["productId", "unit"])
+data class ProductConversionEntity(
+    val productId: String,
+    val unit: String,
+    val factor: Double,
 )
 
 /** A local sale. `state` follows the fixture state machine; never silently lost. */

@@ -5,6 +5,7 @@ import android.net.Uri
 import android.provider.OpenableColumns
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -37,9 +38,11 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -56,7 +59,9 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.kiosk.erp.core.common.Pricing
+import com.kiosk.erp.core.common.Units
 import com.kiosk.erp.core.common.UiTime
+import com.kiosk.erp.core.database.ProductConversionEntity
 import com.kiosk.erp.core.database.ProductEntity
 import com.kiosk.erp.core.designsystem.Banner
 import com.kiosk.erp.core.designsystem.DetailRow
@@ -217,12 +222,16 @@ fun InventoryScreen(vm: InventoryViewModel, onOpenCatalogue: () -> Unit = {}) {
     }
 
     adjusting?.let { product ->
+        // The pack sizes are read from Room on every open, so the dialog offers exactly what this
+        // product can currently be written in — online or not (item 4.6).
+        LaunchedEffect(product.id) { vm.beginAdjust(product) }
         AdjustDialog(
             product = product,
             currentQuantity = quantityByProduct[product.id],
+            packs = vm.adjustPacks.collectAsState().value,
             onDismiss = { adjusting = null },
-            onApply = { delta, reason ->
-                vm.adjust(product, delta, reason)
+            onApply = { entered, unit, base, reason ->
+                vm.adjust(product, entered, unit, base, reason)
                 adjusting = null
             },
         )
@@ -249,7 +258,7 @@ private fun StockRow(product: ProductEntity, quantity: Double?, onHistory: () ->
             }
             Column(horizontalAlignment = Alignment.End, modifier = Modifier.padding(horizontal = 8.dp)) {
                 Text(
-                    quantity?.let { formatQuantity(it) } ?: "—",
+                    quantity?.let { "${Units.formatQuantity(it)} ${product.unit}" } ?: "—",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold,
                     fontFamily = FontFamily.Monospace,
@@ -266,45 +275,105 @@ private fun StockRow(product: ProductEntity, quantity: Double?, onHistory: () ->
 }
 
 /**
- * Adjusting is a two-field decision with the arithmetic shown: current, delta, and the quantity that
- * will result. The reason is not optional — an unexplained movement is not a fact worth posting.
+ * Adjusting is a two-field decision with the arithmetic shown: the quantity as it was counted at
+ * the shelf, the unit it was counted in, and the base quantity that will result. The reason is not
+ * optional — an unexplained movement is not a fact worth posting (item 4.6).
+ *
+ * The conversion here is the device's PREVIEW, computed with the same reference implementation the
+ * server posts with; the queued command carries what was TYPED and the server derives the base
+ * quantity itself, so a screen and a ledger can never disagree about the sum.
  */
 @Composable
 private fun AdjustDialog(
     product: ProductEntity,
     currentQuantity: Double?,
+    packs: List<ProductConversionEntity>,
     onDismiss: () -> Unit,
-    onApply: (Double, String) -> Unit,
+    onApply: (entered: Double, unit: String?, base: Double, reason: String) -> Unit,
 ) {
-    var deltaText by remember { mutableStateOf("") }
-    var reason by remember { mutableStateOf("") }
+    var deltaText by remember(product.id) { mutableStateOf("") }
+    var reason by remember(product.id) { mutableStateOf("") }
+    var unit by remember(product.id) { mutableStateOf(product.unit) }
+
     val delta = deltaText.trim().toDoubleOrNull()
-    val result = if (delta != null && currentQuantity != null) currentQuantity + delta else null
+    val kind = product.unitKind
+    val isBase = unit.equals(product.unit, ignoreCase = true)
+    val packFactor = packs.firstOrNull { it.unit.equals(unit, ignoreCase = true) }?.factor
+
+    // One rule, applied by the same code on both sides. A unit with no known kind has NO rule: the
+    // dialog refuses to convert rather than inventing `count` for a weighed product that nobody has
+    // typed into the unit list yet — the server will not convert without one either (item 4.6).
+    val converted: Units.ConvertResult? = when {
+        delta == null -> null
+        isBase -> kind?.let { Units.convertQuantity(delta, 1.0, 1.0, it) } ?: Units.ConvertResult.Ok(Units.roundQuantity(delta))
+        packFactor == null -> Units.ConvertResult.Failed("UNKNOWN_CONVERSION")
+        kind == null -> Units.ConvertResult.Failed("UNKNOWN_UNIT_KIND")
+        else -> Units.convertQuantity(delta, packFactor, 1.0, kind)
+    }
+    val baseDelta = (converted as? Units.ConvertResult.Ok)?.quantity
+    val failure = (converted as? Units.ConvertResult.Failed)?.code
+    val result = if (baseDelta != null && currentQuantity != null) currentQuantity + baseDelta else null
     val wouldGoNegative = result != null && result < 0
-    val canApply = delta != null && delta != 0.0 && reason.isNotBlank()
+    val canApply = baseDelta != null && baseDelta != 0.0 && reason.isNotBlank()
+    val options = remember(product.id, packs) { (listOf(product.unit) + packs.map { it.unit }).distinctBy { it.lowercase() } }
 
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Adjust ${product.name}") },
         text = {
-            Column {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
                 DetailRow("SKU", product.sku, monospace = true)
-                DetailRow("On hand (cached)", currentQuantity?.let { formatQuantity(it) } ?: "not cached yet")
+                DetailRow("On hand (cached)", currentQuantity?.let { "${Units.formatQuantity(it)} ${product.unit}" } ?: "not cached yet")
+
+                if (options.size > 1) {
+                    Spacer(Modifier.height(StackGap))
+                    Text("Adjust in", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Spacer(Modifier.height(4.dp))
+                    options.forEach { option ->
+                        val selected = option.equals(unit, ignoreCase = true)
+                        val pack = packs.firstOrNull { it.unit.equals(option, ignoreCase = true) }
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth().clickable { unit = option },
+                        ) {
+                            RadioButton(selected = selected, onClick = { unit = option })
+                            Text(
+                                if (pack == null) "$option — stock is held in this"
+                                else "1 $option = ${Units.formatQuantity(pack.factor)} ${product.unit}",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                            )
+                        }
+                    }
+                }
+
                 Spacer(Modifier.height(StackGap))
                 OutlinedTextField(
                     deltaText,
                     { deltaText = it },
-                    label = { Text("Quantity change") },
-                    placeholder = { Text("e.g. 5 or -2") },
+                    label = { Text("Quantity change ($unit)") },
+                    placeholder = { Text(if (isBase) "e.g. 5 or -2" else "e.g. 2 or -1") },
                     singleLine = true,
                     isError = deltaText.isNotBlank() && delta == null,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                     modifier = Modifier.fillMaxWidth(),
                 )
-                if (delta != null && delta != 0.0) {
+                if (failure != null) {
                     Spacer(Modifier.height(6.dp))
+                    Hint(conversionProblem(failure, unit, product.unit), tone = Tone.Error)
+                } else if (delta != null && delta != 0.0 && baseDelta != null) {
+                    Spacer(Modifier.height(6.dp))
+                    if (!isBase) {
+                        // Both numbers are shown, labelled by unit: what was counted, and what the
+                        // ledger will hold. The second is the one stock is actually tracked in.
+                        Text(
+                            "${Units.formatQuantity(delta)} $unit = ${Units.formatQuantity(baseDelta)} ${product.unit}",
+                            style = MaterialTheme.typography.bodySmall,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                    }
                     Text(
-                        "→ ${formatQuantity(result ?: 0.0)} on hand after this is queued",
+                        "→ ${Units.formatQuantity(result ?: 0.0)} ${product.unit} on hand after this is queued",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -329,7 +398,11 @@ private fun AdjustDialog(
         },
         confirmButton = {
             TextButton(
-                onClick = { delta?.let { onApply(it, reason.trim()) } },
+                onClick = {
+                    val entered = delta
+                    val base = baseDelta
+                    if (entered != null && base != null) onApply(entered, if (isBase) null else unit, base, reason.trim())
+                },
                 enabled = canApply,
             ) { Text("Queue adjustment") }
         },
@@ -337,10 +410,19 @@ private fun AdjustDialog(
     )
 }
 
-/** Quantities are plain numbers: show 3, not 3.0, and 0.5 rather than 0.500. */
-private fun formatQuantity(quantity: Double): String =
-    if (quantity == Math.floor(quantity) && !quantity.isInfinite()) quantity.toLong().toString() else quantity.toString()
+/**
+ * Why a conversion could not be done, in the words an operator can act on — the stable code stays
+ * in the log, the sentence goes on screen (item 4.6).
+ */
+private fun conversionProblem(code: String, unit: String, baseUnit: String): String = when (code) {
+    "FRACTIONAL_QUANTITY" -> "$baseUnit is counted, so this has to come out as whole $baseUnit — the server would refuse it too"
+    "UNKNOWN_CONVERSION" -> "This product has no $unit pack size saved, so it can only be adjusted in $baseUnit"
+    "UNKNOWN_UNIT_KIND" -> "The unit list has not reached this device yet, so this pack cannot be checked — enter the change in $baseUnit"
+    "INVALID_CONVERSION_FACTOR" -> "The saved $unit pack size has no usable factor — fix it in the catalogue first"
+    else -> "That quantity cannot be expressed in $baseUnit"
+}
 
+/** Quantities are plain numbers: show 3, not 3.0, and 0.5 rather than 0.500. */
 // --- movement history (item 4.10) -----------------------------------------------------------------
 
 @Composable
@@ -368,7 +450,7 @@ private fun MovementHistoryScreen(history: MovementHistory, vm: InventoryViewMod
             )
             else -> {
                 val total = history.movements.sumOf { it.quantityDelta }
-                Hint("${history.movements.size} movements • net ${formatQuantity(total)} over this window — this is the server's ledger, not a local guess.")
+                Hint("${history.movements.size} movements • net ${Units.formatQuantity(total)} over this window — this is the server's ledger, not a local guess.")
                 Spacer(Modifier.height(StackGap))
                 LazyColumn(verticalArrangement = Arrangement.spacedBy(StackGap), contentPadding = PaddingValues(bottom = 24.dp)) {
                     items(history.movements, key = { it.id }) { movement -> MovementRow(movement) }
@@ -384,13 +466,25 @@ private fun MovementRow(movement: ServerMovement) {
         Column(Modifier.padding(12.dp)) {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                 Pill(sourceLabel(movement.sourceType), if (movement.quantityDelta < 0) Tone.Error else Tone.Success)
-                Text(
-                    formatSignedQuantity(movement.quantityDelta),
-                    fontFamily = FontFamily.Monospace,
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold,
-                    color = if (movement.quantityDelta < 0) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
-                )
+                Column(horizontalAlignment = Alignment.End) {
+                    // The pack the paperwork said, above the base quantity the ledger holds (item 4.6).
+                    if (movement.wasConverted) {
+                        Text(
+                            "${formatSignedQuantity(movement.enteredQuantity ?: 0.0)} ${movement.enteredUnit} →",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            fontFamily = FontFamily.Monospace,
+                        )
+                    }
+                    Text(
+                        formatSignedQuantity(movement.quantityDelta) +
+                            movement.unit.takeIf { it.isNotBlank() }?.let { " $it" }.orEmpty(),
+                        fontFamily = FontFamily.Monospace,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = if (movement.quantityDelta < 0) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
+                    )
+                }
             }
             Spacer(Modifier.height(4.dp))
             Text(formatWhen(movement.occurredAt), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -421,7 +515,7 @@ private fun sourceLabel(sourceType: String): String = when (sourceType) {
 }
 
 private fun formatSignedQuantity(quantity: Double): String {
-    val text = formatQuantity(Math.round(quantity * 1000.0) / 1000.0)
+    val text = Units.formatQuantity(Math.round(quantity * 1000.0) / 1000.0)
     return if (quantity > 0) "+$text" else text
 }
 
@@ -478,8 +572,10 @@ private fun OpeningStockScreen(
 
         if (state.source == null) {
             Hint(
-                "Columns: sku, quantity, unit_cost. unit_cost is optional — leave it out to use the cost " +
-                    "already on the product. The whole file is checked first, and one bad row writes nothing.",
+                "Columns: sku, quantity, unit_cost (money) and unit — the pack the goods arrived in, " +
+                    "e.g. crate. Leave unit_cost out to use the cost already on the product. To use a " +
+                    "unit column, type a header line first: sku,quantity,unit then SKU-008,10,crate. " +
+                    "The whole file is checked first, and one bad row writes nothing.",
             )
             Spacer(Modifier.height(StackGap))
             OutlinedButton(onClick = onPickFile, modifier = Modifier.fillMaxWidth().heightIn(min = 46.dp)) {
@@ -545,7 +641,7 @@ private fun OpeningReport(state: OpeningImportState, report: OpeningStockReport,
     Spacer(Modifier.height(StackGap))
     Row(horizontalArrangement = Arrangement.spacedBy(StackGap), modifier = Modifier.fillMaxWidth()) {
         StatTile("Lines", report.validCount.toString(), caption = "of ${report.rowCount}", modifier = Modifier.weight(1f))
-        StatTile("Units", formatQuantity(report.totalQuantity), modifier = Modifier.weight(1f))
+        StatTile("Units", Units.formatQuantity(report.totalQuantity), modifier = Modifier.weight(1f))
         StatTile("Value", Pricing.formatMinor(report.totalValueMinor), caption = "KES", modifier = Modifier.weight(1f))
     }
 
@@ -623,17 +719,32 @@ private fun OpeningRow(row: OpeningStockPreviewRow) {
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f),
                 )
-                Text(
-                    formatQuantity(row.quantity),
-                    fontFamily = FontFamily.Monospace,
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold,
-                )
+                Column(horizontalAlignment = Alignment.End) {
+                    // What the file said, above what will be recorded — both labelled, never one
+                    // number standing in for the other (item 4.6). Copied into locals because these
+                    // come from another module and cannot be smart-cast.
+                    val enteredQuantity = row.enteredQuantity
+                    val enteredUnit = row.enteredUnit
+                    if (enteredQuantity != null && enteredUnit != null) {
+                        Text(
+                            "${Units.formatQuantity(enteredQuantity)} $enteredUnit →",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            fontFamily = FontFamily.Monospace,
+                        )
+                    }
+                    Text(
+                        "${Units.formatQuantity(row.quantity)} ${row.unit}",
+                        fontFamily = FontFamily.Monospace,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                    )
+                }
             }
             Spacer(Modifier.height(4.dp))
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                 Text(
-                    "on hand ${formatQuantity(row.onHandBefore)} → ${formatQuantity(row.onHandAfter)}",
+                    "on hand ${Units.formatQuantity(row.onHandBefore)} → ${Units.formatQuantity(row.onHandAfter)} ${row.unit}",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )

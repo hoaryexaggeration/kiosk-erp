@@ -3,6 +3,7 @@ package com.kiosk.erp.feature.catalog
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.kiosk.erp.core.common.Pricing
+import com.kiosk.erp.core.common.Units
 import com.kiosk.erp.core.data.repository.ProductRepository
 import com.kiosk.erp.core.data.session.SessionStore
 import com.kiosk.erp.core.database.ProductEntity
@@ -11,8 +12,11 @@ import com.kiosk.erp.core.network.ApiException
 import com.kiosk.erp.core.network.ImportReport
 import com.kiosk.erp.core.network.ImportSource
 import com.kiosk.erp.core.network.ProductDraft
+import com.kiosk.erp.core.network.ServerBrand
 import com.kiosk.erp.core.network.ServerCategory
+import com.kiosk.erp.core.network.ServerConversion
 import com.kiosk.erp.core.network.ServerTaxCategory
+import com.kiosk.erp.core.network.ServerUnit
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -35,6 +39,7 @@ data class ProductEditorState(
     val description: String = "",
     val categoryId: String? = null,
     val taxCategoryId: String? = null,
+    val brandId: String? = null,
     val unit: String = "ea",
     val priceText: String = "",
     val costText: String = "",
@@ -43,6 +48,10 @@ data class ProductEditorState(
     val expectedVersion: Int? = null,
     val barcodes: List<String> = emptyList(),
     val newBarcode: String = "",
+    /** Pack sizes this product may be written in (item 4.6): 1 crate = 24 of the unit above. */
+    val conversions: List<ServerConversion> = emptyList(),
+    val newConversionUnit: String = "",
+    val newConversionFactor: String = "",
     val error: String? = null,
     val saving: Boolean = false,
 ) {
@@ -52,12 +61,16 @@ data class ProductEditorState(
     val priceMinor: Long? get() = Pricing.parseMinorInput(priceText)
     val costMinor: Long? get() = if (costText.isBlank()) 0L else Pricing.parseMinorInput(costText)
     val canSave: Boolean get() = !saving && sku.isNotBlank() && name.isNotBlank() && priceMinor != null && costMinor != null
+    /** What a pack row reads: `1 crate = 24 ea`. */
+    fun conversionLabel(conversion: ServerConversion): String = "1 ${conversion.unit} = ${Units.formatQuantity(conversion.factor)} $unit"
 }
 
-/** Reference data the editor needs (categories and tax rates), refreshed from the server. */
+/** Reference data the editor needs (categories, tax rates, brands and units), refreshed from the server. */
 data class CatalogMeta(
     val categories: List<ServerCategory> = emptyList(),
     val taxCategories: List<ServerTaxCategory> = emptyList(),
+    val units: List<ServerUnit> = emptyList(),
+    val brands: List<ServerBrand> = emptyList(),
     val loading: Boolean = false,
     val online: Boolean = true,
     val message: String? = null,
@@ -66,8 +79,8 @@ data class CatalogMeta(
 /**
  * A bulk import in progress. The file text is held as it arrived — not re-serialised — so what the
  * server validates in the preview is byte-for-byte what a commit sends. Toggling
- * `createMissingCategories` re-runs the preview, because it changes which rows are valid and the
- * operator must approve the same report that the commit will act on.
+ * `createMissingCategories` or `createMissingBrands` re-runs the preview, because each changes which
+ * rows are valid and the operator must approve the same report that the commit will act on.
  */
 data class ImportState(
     val fileName: String,
@@ -77,6 +90,15 @@ data class ImportState(
     val committing: Boolean = false,
     val error: String? = null,
     val createMissingCategories: Boolean = false,
+    val createMissingBrands: Boolean = false,
+)
+
+/** One round-trip of reference data for `loadMeta` — fetched together so the vocabulary is complete. */
+private data class ReferenceData(
+    val categories: List<ServerCategory>,
+    val taxCategories: List<ServerTaxCategory>,
+    val units: List<ServerUnit>,
+    val brands: List<ServerBrand>,
 )
 
 @OptIn(ExperimentalCoroutinesApi::class, FlowPreview::class)
@@ -120,12 +142,27 @@ class CatalogViewModel(
             }
             _meta.value = _meta.value.copy(loading = true)
             runCatching {
-                val cats = api.categories(session.apiBaseUrl, session.accessToken!!)
-                val taxes = api.taxCategories(session.apiBaseUrl, session.accessToken!!)
-                cats to taxes
+                // Units and brands travel with categories and tax rates (item 4.6): the editor and the
+                // stock screen resolve a pack size from these, so they must arrive together or an
+                // offline device has a half-complete vocabulary to work in.
+                val base = session.apiBaseUrl
+                val token = session.accessToken!!
+                ReferenceData(
+                    categories = api.categories(base, token),
+                    taxCategories = api.taxCategories(base, token),
+                    units = api.units(base, token),
+                    brands = api.brands(base, token),
+                )
             }
-                .onSuccess { (cats, taxes) ->
-                    _meta.value = _meta.value.copy(categories = cats, taxCategories = taxes, loading = false, online = true)
+                .onSuccess { fresh ->
+                    _meta.value = _meta.value.copy(
+                        categories = fresh.categories,
+                        taxCategories = fresh.taxCategories,
+                        units = fresh.units,
+                        brands = fresh.brands,
+                        loading = false,
+                        online = true,
+                    )
                 }
                 .onFailure {
                     // Offline is a normal state, not an error: the list still works from the cache.
@@ -162,13 +199,15 @@ class CatalogViewModel(
     }
 
     /**
-     * Seed the editor from the cached product AND its cached barcode set, so saving cannot silently
-     * drop the tags that are already on the item. Reading Room is a suspend call, so the editor opens
-     * once it has the complete picture rather than briefly showing an empty set that could be saved.
+     * Seed the editor from the cached product AND its cached barcode set and pack sizes, so saving
+     * cannot silently drop the tags or conversions that are already on the item. Reading Room is a
+     * suspend call, so the editor opens once it has the complete picture rather than briefly showing
+     * an empty set that could be saved.
      */
     fun openForEdit(product: ProductEntity) {
         viewModelScope.launch {
             val barcodes = productRepository.barcodes(product.id)
+            val conversions = productRepository.conversions(product.id)
             _editor.value = ProductEditorState(
                 id = product.id,
                 sku = product.sku,
@@ -176,6 +215,7 @@ class CatalogViewModel(
                 description = product.description ?: "",
                 categoryId = product.categoryId,
                 taxCategoryId = product.taxCategoryId,
+                brandId = product.brandId,
                 unit = product.unit,
                 priceText = Pricing.formatMinor(product.priceMinor),
                 costText = Pricing.formatMinor(product.costMinor),
@@ -183,6 +223,7 @@ class CatalogViewModel(
                 isActive = product.isActive,
                 expectedVersion = product.version,
                 barcodes = barcodes,
+                conversions = conversions.map { ServerConversion(unit = it.unit, factor = it.factor) },
             )
         }
     }
@@ -210,6 +251,55 @@ class CatalogViewModel(
         _editor.value = _editor.value?.let { it.copy(barcodes = it.barcodes.filterNot { b -> b == code }) }
     }
 
+    // --- pack sizes (item 4.6) -------------------------------------------------------------------
+
+    /**
+     * Add (or restate) a pack size. The same three refusals the server makes, made here first so the
+     * operator is told at the field rather than after a round-trip: an unknown unit, a pack that
+     * converts the unit into itself, and a factor that could not describe one.
+     */
+    fun addConversion() {
+        val current = _editor.value ?: return
+        val unit = current.newConversionUnit.trim()
+        val factorText = current.newConversionFactor.trim()
+        if (unit.isEmpty() || factorText.isEmpty()) return
+
+        val fail: (String) -> Unit = { message -> _editor.value = current.copy(error = message) }
+        if (unit.equals(current.unit, ignoreCase = true)) {
+            fail("\"$unit\" is already the unit this product sells in — a pack size converts a different unit into it")
+            return
+        }
+        val known = _meta.value.units.any { it.code.equals(unit, ignoreCase = true) }
+        if (_meta.value.units.isNotEmpty() && !known) {
+            fail("There is no unit \"$unit\" — add it under Manage first (item 4.6)")
+            return
+        }
+        if (_meta.value.units.isNotEmpty() && _meta.value.units.none { it.code.equals(current.unit, ignoreCase = true) }) {
+            fail("Selling unit \"${current.unit}\" is not in the unit list either — add it under Manage before giving the product pack sizes")
+            return
+        }
+        val factor = factorText.toDoubleOrNull()
+        if (factor == null || !factor.isFinite() || factor <= 0.0) {
+            fail("How many ${current.unit}s make one $unit? That number must be more than zero")
+            return
+        }
+
+        // A set, not a list: restating a pack replaces it, and the save sends the whole set.
+        val rest = current.conversions.filterNot { it.unit.equals(unit, ignoreCase = true) }
+        _editor.value = current.copy(
+            conversions = (rest + ServerConversion(unit = unit, factor = factor)).sortedBy { it.unit.lowercase() },
+            newConversionUnit = "",
+            newConversionFactor = "",
+            error = null,
+        )
+    }
+
+    fun removeConversion(unit: String) {
+        _editor.value = _editor.value?.let { state ->
+            state.copy(conversions = state.conversions.filterNot { it.unit.equals(unit, ignoreCase = true) })
+        }
+    }
+
     fun save() {
         val editor = _editor.value ?: return
         val priceMinor = editor.priceMinor
@@ -232,12 +322,14 @@ class CatalogViewModel(
                 description = editor.description.trim().ifBlank { null },
                 categoryId = editor.categoryId,
                 taxCategoryId = editor.taxCategoryId,
+                brandId = editor.brandId,
                 unit = editor.unit.trim().ifBlank { "ea" },
                 priceMinor = priceMinor,
                 costMinor = costMinor,
                 isStockTracked = editor.isStockTracked,
                 isActive = editor.isActive,
                 barcodes = editor.barcodes,
+                conversions = editor.conversions,
                 expectedVersion = editor.expectedVersion,
             )
             runCatching { api.saveProduct(session.apiBaseUrl, session.accessToken!!, draft) }
@@ -260,6 +352,8 @@ class CatalogViewModel(
                 _meta.value = _meta.value.copy(message = "Sign in first (Setup) to change the catalogue")
                 return@launch
             }
+            // Both sets travel with the change: the update replaces what the server holds, so sending
+            // an empty pack set here would quietly retire every crate size on the item (item 4.6).
             val draft = ProductDraft(
                 id = product.id,
                 sku = product.sku,
@@ -267,12 +361,15 @@ class CatalogViewModel(
                 description = product.description,
                 categoryId = product.categoryId,
                 taxCategoryId = product.taxCategoryId,
+                brandId = product.brandId,
                 unit = product.unit,
                 priceMinor = product.priceMinor,
                 costMinor = product.costMinor,
                 isStockTracked = product.isStockTracked,
                 isActive = active,
                 barcodes = productRepository.barcodes(product.id),
+                conversions = productRepository.conversions(product.id)
+                    .map { ServerConversion(unit = it.unit, factor = it.factor) },
                 expectedVersion = product.version,
             )
             runCatching { api.saveProduct(session.apiBaseUrl, session.accessToken!!, draft) }
@@ -324,6 +421,44 @@ class CatalogViewModel(
         }
     }
 
+    // --- units of measure and brands (item 4.6) ---------------------------------------------------
+
+    /** `kind` decides what a quantity in this unit may be: a count stays whole, a weight may not. */
+    fun createUnit(code: String, name: String, kind: String) {
+        if (code.isBlank() || name.isBlank()) return
+        viewModelScope.launch {
+            val session = sessionStore.current()
+            if (!session.isAuthenticated) {
+                _meta.value = _meta.value.copy(message = "Sign in first (Setup)")
+                return@launch
+            }
+            runCatching { api.createUnit(session.apiBaseUrl, session.accessToken!!, code.trim(), name.trim(), kind) }
+                .onSuccess { created ->
+                    _meta.value = _meta.value.copy(
+                        units = (_meta.value.units + created).sortedBy { it.code.lowercase() },
+                        message = "Unit \"${created.code}\" added",
+                    )
+                }
+                .onFailure { _meta.value = _meta.value.copy(message = "Failed: ${describe(it)}") }
+        }
+    }
+
+    fun createBrand(name: String) {
+        if (name.isBlank()) return
+        viewModelScope.launch {
+            val session = sessionStore.current()
+            if (!session.isAuthenticated) {
+                _meta.value = _meta.value.copy(message = "Sign in first (Setup)")
+                return@launch
+            }
+            runCatching { api.createBrand(session.apiBaseUrl, session.accessToken!!, name.trim()) }
+                .onSuccess { created ->
+                    _meta.value = _meta.value.copy(brands = (_meta.value.brands + created).sortedBy { it.name.lowercase() }, message = "Brand \"${created.name}\" added")
+                }
+                .onFailure { _meta.value = _meta.value.copy(message = "Failed: ${describe(it)}") }
+        }
+    }
+
     // --- bulk import (item 4.4) ------------------------------------------------------------------
 
     /** The file is validated by the SERVER, so a preview here is the real thing, not a local guess. */
@@ -335,6 +470,13 @@ class CatalogViewModel(
     fun setImportCreateMissingCategories(value: Boolean) {
         val current = _import.value ?: return
         _import.value = current.copy(createMissingCategories = value)
+        runImport(commit = false)
+    }
+
+    /** Brands are labels too, but an invented one is still an invented one — the operator decides. */
+    fun setImportCreateMissingBrands(value: Boolean) {
+        val current = _import.value ?: return
+        _import.value = current.copy(createMissingBrands = value)
         runImport(commit = false)
     }
 
@@ -360,7 +502,14 @@ class CatalogViewModel(
                 return@launch
             }
             runCatching {
-                api.importProducts(session.apiBaseUrl, session.accessToken!!, current.source, commit, current.createMissingCategories)
+                api.importProducts(
+                    session.apiBaseUrl,
+                    session.accessToken!!,
+                    current.source,
+                    commit,
+                    current.createMissingCategories,
+                    current.createMissingBrands,
+                )
             }
                 .onSuccess { report ->
                     if (commit && report.isValid) {
@@ -392,6 +541,14 @@ class CatalogViewModel(
             "VERSION_MISMATCH" -> "Someone else changed this product first — reopen it and try again"
             "FORBIDDEN" -> "Your role cannot change the catalogue"
             "INVALID_IMPORT_FILE" -> detail
+            // Unit and pack-size refusals (item 4.6): the server's sentence already names the unit,
+            // the factor or the product, which is exactly what an operator needs to fix the field.
+            "UNKNOWN_UNIT" -> "That unit is not in this shop's unit list — add it under Manage first"
+            "DUPLICATE_UNIT" -> "That unit already exists"
+            "DUPLICATE_BRAND" -> "That brand already exists"
+            "UNKNOWN_UNIT_KIND" -> detail
+            "SELF_CONVERSION", "UNKNOWN_CONVERSION", "UNKNOWN_BRAND", "INVALID_BRAND" -> detail
+            "INVALID_FACTOR", "INVALID_CONVERSION_FACTOR", "FRACTIONAL_QUANTITY" -> detail
             null -> "Could not reach the server ($detail)"
             else -> "$detail (${api.code})"
         }

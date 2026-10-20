@@ -166,7 +166,9 @@ export class SyncService {
         return { status: 'rejected', code: 'VALIDATION_ERROR', message: parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ') };
       }
       const applied = await this.inventoryService.receiveStock(trx, commandCtx, parsed.data);
-      return { status: applied.status, result: applied.result };
+      // A refusal must reach the device with its code: "no pack size for this product" is
+      // actionable, a bare `rejected` is not (item 4.6, §6 sync state).
+      return { status: applied.status, result: applied.result, code: applied.code, message: applied.message, conflictCodes: applied.conflictCodes };
     }
 
     if (command.aggregateType === 'StockAdjustment') {

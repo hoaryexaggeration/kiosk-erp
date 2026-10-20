@@ -56,6 +56,7 @@ describe('catalogue bulk import (Phase 4, item 4.4)', () => {
       ].join('\n'),
       commit: true,
       createMissingCategories: true,
+      createMissingBrands: false,
     });
     expect(res.status).toBe(201);
     expect(res.body).toMatchObject({ status: 'committed', createCount: 1, errorCount: 0, categoriesToCreate: ['Snacks'] });
@@ -67,6 +68,31 @@ describe('catalogue bulk import (Phase 4, item 4.4)', () => {
     expect(product.tax_category_id).toBe(SEED.taxCategoryId);
     expect(product.barcodes.sort()).toEqual(['6009000000011', '6009000000028']);
     expect(product.category_id).toBeTruthy();
+  });
+
+  it('resolves a brand by name, and only invents one when the file is allowed to', async () => {
+    const withBrand = (brand: string) => ['sku,name,price,brand', `BR-1,Branded biscuits,10,${brand}`].join('\n');
+
+    // An unknown brand is a typo until somebody says otherwise — the same rule categories follow.
+    const refused = await runImport(token, { csv: withBrand('Imported Brand'), commit: true });
+    expect(refused.status).toBe(201);
+    expect(refused.body).toMatchObject({ status: 'invalid', errorCount: 1, brandsToCreate: [] });
+    expect(refused.body.errors[0]).toMatchObject({ code: 'UNKNOWN_BRAND', field: 'brand' });
+    expect(await productBySku('BR-1')).toBeUndefined();
+
+    // Asked for, the file's own brand becomes a brand and the product points at it.
+    const allowed = await runImport(token, { csv: withBrand('Imported Brand'), commit: true, createMissingBrands: true });
+    expect(allowed.body).toMatchObject({ status: 'committed', createCount: 1, brandsToCreate: ['Imported Brand'] });
+    expect(await productBySku('BR-1')).toMatchObject({ brand_name: 'Imported Brand', brand_id: expect.any(String) });
+
+    // A brand that already exists is matched by name, case-insensitively, and never duplicated.
+    const known = await runImport(token, {
+      csv: ['sku,name,price,brand', 'BR-2,Existing brand,10,kaskazi drinks'].join('\n'),
+      commit: true,
+      createMissingBrands: true,
+    });
+    expect(known.body).toMatchObject({ status: 'committed', brandsToCreate: [] });
+    expect(await productBySku('BR-2')).toMatchObject({ brand_name: 'Kaskazi Drinks' });
   });
 
   it('writes nothing at all when one row is bad, and reports the bad row', async () => {

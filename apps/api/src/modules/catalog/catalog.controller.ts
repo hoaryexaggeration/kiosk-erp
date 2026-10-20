@@ -3,6 +3,19 @@ import { z } from 'zod';
 import { CatalogService } from './catalog.service';
 import { AuthContext, AuthedRequest, CurrentAuth, RequirePermissions } from '../../common/auth-context';
 
+/**
+ * Pack sizes (item 4.6): `1 <unit> = <factor> <product's base unit>`. The factor itself is checked
+ * against the tenant's unit catalogue in the service — a schema cannot know which units exist.
+ */
+const ConversionSetSchema = z
+  .array(
+    z.object({
+      unit: z.string().min(1).max(16),
+      factor: z.number().finite().positive(),
+    }),
+  )
+  .max(50);
+
 const CreateProductSchema = z.object({
   id: z.string().uuid().optional(),
   sku: z.string().min(1).max(64),
@@ -10,11 +23,14 @@ const CreateProductSchema = z.object({
   description: z.string().max(2000).optional(),
   categoryId: z.string().uuid().optional(),
   taxCategoryId: z.string().uuid().optional(),
+  brandId: z.string().uuid().nullable().optional(),
   unit: z.string().max(16).optional(),
   isStockTracked: z.boolean().optional(),
   priceMinor: z.number().int().nonnegative().optional(),
   costMinor: z.number().int().nonnegative().optional(),
   barcodes: z.array(z.string().min(1).max(64)).max(20).optional(),
+  /** `1 <unit> = <factor> <unit>` pack sizes (item 4.6); absent means "no conversions". */
+  conversions: ConversionSetSchema.optional(),
 });
 
 const UpdateProductSchema = z.object({
@@ -23,6 +39,7 @@ const UpdateProductSchema = z.object({
   description: z.string().max(2000).nullable().optional(),
   categoryId: z.string().uuid().nullable().optional(),
   taxCategoryId: z.string().uuid().nullable().optional(),
+  brandId: z.string().uuid().nullable().optional(),
   unit: z.string().max(16).optional(),
   isStockTracked: z.boolean().optional(),
   isActive: z.boolean().optional(),
@@ -30,6 +47,8 @@ const UpdateProductSchema = z.object({
   costMinor: z.number().int().nonnegative().optional(),
   /** The full desired barcode set for this product; the server replaces what is stored. */
   barcodes: z.array(z.string().min(1).max(64)).max(20).optional(),
+  /** The full desired conversion set; the server replaces what is stored. Absent leaves it alone. */
+  conversions: ConversionSetSchema.optional(),
   expectedVersion: z.number().int().positive().optional(),
 });
 
@@ -47,6 +66,23 @@ const CategorySchema = z.object({
 });
 
 /**
+ * A unit of measure (item 4.6). `kind` is what the ledger cares about: a `count` base unit must
+ * stay whole, `weight` and `volume` may be fractional.
+ */
+const UnitSchema = z.object({
+  id: z.string().uuid().optional(),
+  code: z.string().min(1).max(16),
+  name: z.string().min(1).max(60),
+  kind: z.enum(['count', 'weight', 'volume']),
+});
+
+/** A brand (§3.C product master). Names are unique per tenant ignoring case. */
+const BrandSchema = z.object({
+  id: z.string().uuid().optional(),
+  name: z.string().min(1).max(120),
+});
+
+/**
  * Bulk import. `csv` or `records` (not both); `commit: false` is a pure preview. A file with any bad
  * row is reported, not partially applied — see CatalogService.importProducts.
  */
@@ -56,6 +92,8 @@ const ProductImportSchema = z
     records: z.array(z.unknown()).max(5000).optional(),
     commit: z.boolean().default(false),
     createMissingCategories: z.boolean().default(false),
+    /** Brands are labels, not money — but they are still created only when asked for (item 4.6). */
+    createMissingBrands: z.boolean().default(false),
   })
   .refine((value) => (value.csv === undefined) !== (value.records === undefined), {
     message: 'Provide exactly one of csv or records',
@@ -129,6 +167,32 @@ export class CatalogController {
   async createCategory(@CurrentAuth() ctx: AuthContext, @Req() req: AuthedRequest, @Body() body: unknown) {
     const input = CategorySchema.parse(body);
     return this.catalog.createCategory(ctx.tenantId, ctx.userId, req.correlationId, input);
+  }
+
+  /** Unit catalogue (item 4.6). Reading it is not a privileged act; adding one is. */
+  @Get('units')
+  async units(@CurrentAuth() ctx: AuthContext) {
+    return this.catalog.listUnits(ctx.tenantId);
+  }
+
+  @Post('units')
+  @RequirePermissions('catalog.manage')
+  async createUnit(@CurrentAuth() ctx: AuthContext, @Req() req: AuthedRequest, @Body() body: unknown) {
+    const input = UnitSchema.parse(body);
+    return this.catalog.createUnit(ctx.tenantId, ctx.userId, req.correlationId, input);
+  }
+
+  /** Brands a product can belong to (§3.C product master, item 4.6). */
+  @Get('brands')
+  async brands(@CurrentAuth() ctx: AuthContext) {
+    return this.catalog.listBrands(ctx.tenantId);
+  }
+
+  @Post('brands')
+  @RequirePermissions('catalog.manage')
+  async createBrand(@CurrentAuth() ctx: AuthContext, @Req() req: AuthedRequest, @Body() body: unknown) {
+    const input = BrandSchema.parse(body);
+    return this.catalog.createBrand(ctx.tenantId, ctx.userId, req.correlationId, input);
   }
 
   @Get('config/snapshot')

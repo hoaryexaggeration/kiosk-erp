@@ -15,6 +15,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
     entities = [
         ProductEntity::class,
         BarcodeEntity::class,
+        ProductConversionEntity::class,
         SaleEntity::class,
         SaleLineEntity::class,
         TenderEntity::class,
@@ -22,7 +23,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         SyncStateEntity::class,
         StockBalanceEntity::class,
     ],
-    version = 3,
+    version = 4,
     exportSchema = false,
 )
 abstract class KioskDatabase : RoomDatabase() {
@@ -55,7 +56,7 @@ abstract class KioskDatabase : RoomDatabase() {
 
         fun build(context: Context): KioskDatabase =
             Room.databaseBuilder(context, KioskDatabase::class.java, "kiosk-erp.db")
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
                 .fallbackToDestructiveMigrationOnDowngrade()
                 .build()
 
@@ -70,6 +71,27 @@ abstract class KioskDatabase : RoomDatabase() {
                 db.execSQL("ALTER TABLE `products` ADD COLUMN `categoryId` TEXT")
                 db.execSQL("ALTER TABLE `products` ADD COLUMN `taxCategoryId` TEXT")
                 db.execSQL("ALTER TABLE `products` ADD COLUMN `isActive` INTEGER NOT NULL DEFAULT 1")
+            }
+        }
+
+        /**
+         * v3 → v4 (item 4.6): a brand on the product, its pack sizes as a set, and the `kind` of the
+         * base unit those pack sizes convert into — without it an offline device cannot tell a crate
+         * count (which must land on a whole number) from a weigh (which may not). All additive: a
+         * device upgraded with unsynced sales in the outbox keeps them, nothing is dropped.
+         */
+        val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `products` ADD COLUMN `brandId` TEXT")
+                db.execSQL("ALTER TABLE `products` ADD COLUMN `brandName` TEXT")
+                db.execSQL("ALTER TABLE `products` ADD COLUMN `unitKind` TEXT")
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `product_conversions` (" +
+                        "`productId` TEXT NOT NULL, " +
+                        "`unit` TEXT NOT NULL, " +
+                        "`factor` REAL NOT NULL, " +
+                        "PRIMARY KEY(`productId`, `unit`))",
+                )
             }
         }
     }

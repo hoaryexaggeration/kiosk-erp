@@ -39,6 +39,12 @@ data class AuthSession(
     val userId: String?,
 )
 
+/**
+ * A pack size (item 4.6): `1 <unit> = <factor> <product's base unit>`. Stock is only ever held in
+ * the base unit, so `factor` is what turns a receipt in crates into bottles on one ledger.
+ */
+data class ServerConversion(val unit: String, val factor: Double)
+
 data class ServerProduct(
     val id: String,
     val sku: String,
@@ -53,6 +59,16 @@ data class ServerProduct(
     val description: String? = null,
     val categoryId: String? = null,
     val taxCategoryId: String? = null,
+    val brandId: String? = null,
+    val brandName: String? = null,
+    /**
+     * `count` / `weight` / `volume` for the unit this product is stocked in, or null when that unit
+     * is not in the shop's vocabulary. Carried with the conversions because the two travel together:
+     * a pack conversion needs the rule its base unit implies, offline (item 4.6).
+     */
+    val unitKind: String? = null,
+    /** The full set the server reports for this product — replaced into the cache as a SET. */
+    val conversions: List<ServerConversion> = emptyList(),
     val isStockTracked: Boolean = true,
     val isActive: Boolean = true,
 )
@@ -61,10 +77,20 @@ data class ServerCategory(val id: String, val name: String, val parentId: String
 
 data class ServerTaxCategory(val id: String, val name: String, val rateBp: Int, val inclusive: Boolean)
 
+/** A unit of measure (item 4.6). `kind` decides whether a converted quantity must stay whole. */
+data class ServerUnit(val code: String, val name: String, val kind: String) {
+    /** What the operator reads: `crate (count)`. */
+    val label: String get() = "$code ($kind)"
+}
+
+/** A brand a product can belong to (§3.C). Names are unique per shop, ignoring case. */
+data class ServerBrand(val id: String, val name: String)
+
 /**
- * Everything the catalogue editor can set. `barcodes` is the FULL desired set — the server replaces
- * what it holds (item 4.1), so removing a tag here removes it everywhere after sync.
- * `expectedVersion` carries the optimistic-concurrency check so a stale edit cannot silently win.
+ * Everything the catalogue editor can set. `barcodes` and `conversions` are the FULL desired sets —
+ * the server replaces what it holds (items 4.1 and 4.6), so removing a tag or a pack size here
+ * removes it everywhere after sync. `expectedVersion` carries the optimistic-concurrency check so a
+ * stale edit cannot silently win.
  */
 data class ProductDraft(
     val id: String?,
@@ -73,12 +99,14 @@ data class ProductDraft(
     val description: String? = null,
     val categoryId: String? = null,
     val taxCategoryId: String? = null,
+    val brandId: String? = null,
     val unit: String = "ea",
     val priceMinor: Long = 0,
     val costMinor: Long = 0,
     val isStockTracked: Boolean = true,
     val isActive: Boolean = true,
     val barcodes: List<String> = emptyList(),
+    val conversions: List<ServerConversion> = emptyList(),
     val expectedVersion: Int? = null,
 )
 
@@ -100,13 +128,21 @@ data class ServerMovement(
     val id: String,
     val productId: String,
     val sku: String,
+    /** The BASE-unit quantity the ledger holds — the only number stock is ever counted in. */
     val quantityDelta: Double,
+    val unit: String,
+    /** The pack the paperwork said, when it was a different unit: "10 crate" for +240 ea (item 4.6). */
+    val enteredUnit: String?,
+    val enteredQuantity: Double?,
     val reason: String?,
     val sourceType: String,
     val sourceId: String?,
     val cogsMinor: Long?,
     val occurredAt: String,
-)
+) {
+    /** True when the movement arrived in a pack rather than the unit stock is held in. */
+    val wasConverted: Boolean get() = enteredUnit != null && enteredQuantity != null
+}
 
 /** One rejected row of a bulk import, pointing at the line the operator sees in their file. */
 data class ImportRowError(
@@ -139,6 +175,8 @@ data class ImportReport(
     val createCount: Int,
     val updateCount: Int,
     val categoriesToCreate: List<String> = emptyList(),
+    /** Brands the file names that do not exist yet — created only if the operator asks (item 4.6). */
+    val brandsToCreate: List<String> = emptyList(),
     val errors: List<ImportRowError> = emptyList(),
     val preview: List<ImportPreviewRow> = emptyList(),
     val previewTruncated: Boolean = false,
@@ -164,8 +202,12 @@ data class OpeningStockPreviewRow(
     val line: Int,
     val sku: String,
     val name: String,
+    /** The unit the quantity will be RECORDED in: always the product's base unit (item 4.6). */
     val unit: String,
     val quantity: Double,
+    /** What the file said when it named a pack (`crate`) instead — null for a plain base-unit row. */
+    val enteredUnit: String?,
+    val enteredQuantity: Double?,
     val onHandBefore: Double,
     val onHandAfter: Double,
     val unitCostMinor: Long,
@@ -412,8 +454,61 @@ class ApiClient {
     }
 
     /**
+     * The unit vocabulary (item 4.6). Every quantity the device shows or queues is expressed in one
+     * of these, and `kind` is what says a counted base must stay whole — so this is read before an
+     * adjustment in packs can be offered at all.
+     */
+    suspend fun units(baseUrl: String, token: String): List<ServerUnit> = withContext(Dispatchers.IO) {
+        val response = get(baseUrl, "units", token).jsonObject
+        response["units"]?.jsonArray?.map { element ->
+            val obj = element.jsonObject
+            ServerUnit(
+                code = obj["code"]?.jsonPrimitive?.content ?: "",
+                name = obj["name"]?.jsonPrimitive?.content ?: "",
+                kind = obj["kind"]?.jsonPrimitive?.content ?: "count",
+            )
+        } ?: emptyList()
+    }
+
+    suspend fun createUnit(baseUrl: String, token: String, code: String, name: String, kind: String): ServerUnit = withContext(Dispatchers.IO) {
+        val body = buildJsonObject {
+            put("code", code)
+            put("name", name)
+            put("kind", kind)
+        }
+        val obj = post(baseUrl, "units", token, body).jsonObject
+        ServerUnit(
+            code = obj["code"]?.jsonPrimitive?.content ?: code,
+            name = obj["name"]?.jsonPrimitive?.content ?: name,
+            kind = obj["kind"]?.jsonPrimitive?.content ?: kind,
+        )
+    }
+
+    suspend fun brands(baseUrl: String, token: String): List<ServerBrand> = withContext(Dispatchers.IO) {
+        val response = get(baseUrl, "brands", token).jsonObject
+        response["brands"]?.jsonArray?.map { element ->
+            val obj = element.jsonObject
+            ServerBrand(
+                id = obj["id"]?.jsonPrimitive?.content ?: "",
+                name = obj["name"]?.jsonPrimitive?.content ?: "",
+            )
+        } ?: emptyList()
+    }
+
+    suspend fun createBrand(baseUrl: String, token: String, name: String): ServerBrand = withContext(Dispatchers.IO) {
+        val body = buildJsonObject { put("name", name) }
+        val obj = post(baseUrl, "brands", token, body).jsonObject
+        ServerBrand(
+            id = obj["id"]?.jsonPrimitive?.content ?: "",
+            name = obj["name"]?.jsonPrimitive?.content ?: name,
+        )
+    }
+
+    /**
      * `POST /products` rejects an explicit null for description/category/tax (only `undefined` is
      * accepted), so a create omits absent optionals while an update sends null to clear them.
+     * `brandId` follows that rule exactly, and both sets (`barcodes`, `conversions`) are always
+     * sent: what the editor holds is what the product should have (items 4.1 and 4.6).
      */
     private fun productBody(draft: ProductDraft, forCreate: Boolean): JsonObject = buildJsonObject {
         put("sku", draft.sku)
@@ -423,14 +518,25 @@ class ApiClient {
         put("costMinor", draft.costMinor)
         put("isStockTracked", draft.isStockTracked)
         put("barcodes", JsonArray(draft.barcodes.map { JsonPrimitive(it) }))
+        put(
+            "conversions",
+            JsonArray(draft.conversions.map { conversion ->
+                buildJsonObject {
+                    put("unit", conversion.unit)
+                    put("factor", conversion.factor)
+                }
+            }),
+        )
         if (forCreate) {
             draft.description?.let { put("description", it) }
             draft.categoryId?.let { put("categoryId", it) }
             draft.taxCategoryId?.let { put("taxCategoryId", it) }
+            draft.brandId?.let { put("brandId", it) }
         } else {
             put("description", draft.description)
             put("categoryId", draft.categoryId)
             put("taxCategoryId", draft.taxCategoryId)
+            put("brandId", draft.brandId)
             put("isActive", draft.isActive)
             draft.expectedVersion?.let { put("expectedVersion", it) }
         }
@@ -450,6 +556,15 @@ class ApiClient {
         description = this["description"]?.jsonPrimitive?.contentOrNull,
         categoryId = this["category_id"]?.jsonPrimitive?.contentOrNull,
         taxCategoryId = this["tax_category_id"]?.jsonPrimitive?.contentOrNull,
+        brandId = this["brand_id"]?.jsonPrimitive?.contentOrNull,
+        brandName = this["brand_name"]?.jsonPrimitive?.contentOrNull,
+        unitKind = this["unit_kind"]?.jsonPrimitive?.contentOrNull,
+        conversions = this["conversions"]?.jsonArray?.mapNotNull { element ->
+            val conversion = element.jsonObject
+            val unit = conversion["unit"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+            val factor = conversion["factor"]?.jsonPrimitive?.content?.toDoubleOrNull() ?: return@mapNotNull null
+            ServerConversion(unit = unit, factor = factor)
+        } ?: emptyList(),
         isStockTracked = this["is_stock_tracked"]?.jsonPrimitive?.content?.toBooleanStrictOrNull() ?: true,
         isActive = this["is_active"]?.jsonPrimitive?.content?.toBooleanStrictOrNull() ?: true,
     )
@@ -479,6 +594,7 @@ class ApiClient {
         source: ImportSource,
         commit: Boolean,
         createMissingCategories: Boolean,
+        createMissingBrands: Boolean = false,
     ): ImportReport = withContext(Dispatchers.IO) {
         val body = buildJsonObject {
             when (source) {
@@ -487,6 +603,7 @@ class ApiClient {
             }
             put("commit", commit)
             put("createMissingCategories", createMissingCategories)
+            put("createMissingBrands", createMissingBrands)
         }
         post(baseUrl, "products/import", token, body).jsonObject.toImportReport()
     }
@@ -537,6 +654,7 @@ class ApiClient {
         createCount = this["createCount"]?.jsonPrimitive?.content?.toIntOrNull() ?: 0,
         updateCount = this["updateCount"]?.jsonPrimitive?.content?.toIntOrNull() ?: 0,
         categoriesToCreate = this["categoriesToCreate"]?.jsonArray?.mapNotNull { it.jsonPrimitive.contentOrNull } ?: emptyList(),
+        brandsToCreate = this["brandsToCreate"]?.jsonArray?.mapNotNull { it.jsonPrimitive.contentOrNull } ?: emptyList(),
         errors = this["errors"]?.jsonArray?.map { element ->
             val error = element.jsonObject
             ImportRowError(
@@ -598,6 +716,8 @@ class ApiClient {
                 name = row["name"]?.jsonPrimitive?.content ?: "",
                 unit = row["unit"]?.jsonPrimitive?.content ?: "",
                 quantity = row["quantity"]?.jsonPrimitive?.content?.toDoubleOrNull() ?: 0.0,
+                enteredUnit = row["enteredUnit"]?.jsonPrimitive?.contentOrNull,
+                enteredQuantity = row["enteredQuantity"]?.jsonPrimitive?.content?.toDoubleOrNull(),
                 onHandBefore = row["onHandBefore"]?.jsonPrimitive?.content?.toDoubleOrNull() ?: 0.0,
                 onHandAfter = row["onHandAfter"]?.jsonPrimitive?.content?.toDoubleOrNull() ?: 0.0,
                 unitCostMinor = row["unitCostMinor"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0L,
@@ -622,6 +742,9 @@ class ApiClient {
                 productId = obj["product_id"]?.jsonPrimitive?.content ?: "",
                 sku = obj["sku"]?.jsonPrimitive?.content ?: "",
                 quantityDelta = obj["quantity_delta"]?.jsonPrimitive?.content?.toDoubleOrNull() ?: 0.0,
+                unit = obj["unit"]?.jsonPrimitive?.content ?: "",
+                enteredUnit = obj["entered_unit"]?.jsonPrimitive?.contentOrNull,
+                enteredQuantity = obj["entered_quantity"]?.jsonPrimitive?.content?.toDoubleOrNull(),
                 reason = obj["reason"]?.jsonPrimitive?.contentOrNull,
                 sourceType = obj["source_type"]?.jsonPrimitive?.content ?: "",
                 sourceId = obj["source_id"]?.jsonPrimitive?.contentOrNull,

@@ -1,12 +1,22 @@
 import { Injectable } from '@nestjs/common';
-import { Kysely } from 'kysely';
+import { Kysely, sql } from 'kysely';
 import { DbService } from '../../db/db.service';
 import { Database } from '../../db/database';
 import { EventsService } from '../platform/events.service';
 import { AppError } from '../../common/errors';
 import { newId } from '../../common/ids';
 import { parseCsv } from '../../domain/csv';
+import { UNIT_KINDS, UnitKind } from '../../domain/units';
 import { ImportReferenceData, planProductImport, recordsToCsvRows } from './product-import';
+
+/**
+ * One pack size of a product: `1 <unit> = <factor> <product's base unit>` (item 4.6). Devices
+ * cache these so a crate converts offline, and the stock ledger only ever sees the base unit.
+ */
+export interface ProductConversion {
+  unit: string;
+  factor: number;
+}
 
 export interface CreateProductInput {
   id?: string;
@@ -15,11 +25,14 @@ export interface CreateProductInput {
   description?: string;
   categoryId?: string;
   taxCategoryId?: string;
+  brandId?: string | null;
   unit?: string;
   isStockTracked?: boolean;
   priceMinor?: number;
   costMinor?: number;
   barcodes?: string[];
+  /** The full desired conversion set; absent means "leave the stored set alone". */
+  conversions?: ProductConversion[];
 }
 
 export interface UpdateProductInput {
@@ -28,6 +41,8 @@ export interface UpdateProductInput {
   description?: string | null;
   categoryId?: string | null;
   taxCategoryId?: string | null;
+  /** Explicit null clears the brand, exactly like `categoryId`. */
+  brandId?: string | null;
   unit?: string;
   isStockTracked?: boolean;
   isActive?: boolean;
@@ -39,6 +54,8 @@ export interface UpdateProductInput {
    * product is no longer the only way to make an item scannable.
    */
   barcodes?: string[];
+  /** The full desired conversion set. Same rule as barcodes: present means replace, absent means leave. */
+  conversions?: ProductConversion[];
   expectedVersion?: number;
 }
 
@@ -54,6 +71,7 @@ export class CatalogService {
     const row = await trx
       .selectFrom('products')
       .leftJoin('tax_categories', 'tax_categories.id', 'products.tax_category_id')
+      .leftJoin('brands', 'brands.id', 'products.brand_id')
       .select([
         'products.id',
         'products.sku',
@@ -61,6 +79,7 @@ export class CatalogService {
         'products.description',
         'products.category_id',
         'products.tax_category_id',
+        'products.brand_id',
         'products.unit',
         'products.price_minor',
         'products.cost_minor',
@@ -69,11 +88,17 @@ export class CatalogService {
         'products.version',
         'tax_categories.rate_bp as tax_rate_bp',
         'tax_categories.inclusive as tax_inclusive',
+        'brands.name as brand_name',
       ])
       .where('products.id', '=', productId)
       .where('products.tenant_id', '=', tenantId)
       .executeTakeFirstOrThrow();
     const barcodes = await this.barcodesFor(trx, tenantId, [productId]);
+    const conversions = await this.conversionsFor(trx, tenantId, [productId]);
+    // The kind of the base unit rides WITH the pack sizes: a device converting a receipt while the
+    // shop is offline needs the rule (`count` stays whole, a weigh may not) on the same payload that
+    // brings the factor it is applying (item 4.6).
+    const unitKind = await this.unitKindFor(trx, tenantId, row.unit);
     return {
       id: row.id,
       sku: row.sku,
@@ -83,7 +108,10 @@ export class CatalogService {
       // Without this a device editing a product would send `taxCategoryId: null` and silently
       // clear the product's tax rate.
       tax_category_id: row.tax_category_id,
+      brand_id: row.brand_id,
+      brand_name: row.brand_name ?? null,
       unit: row.unit,
+      unit_kind: unitKind,
       price_minor: Number(row.price_minor),
       cost_minor: Number(row.cost_minor),
       is_stock_tracked: row.is_stock_tracked,
@@ -92,6 +120,7 @@ export class CatalogService {
       tax_rate_bp: row.tax_rate_bp ?? 0,
       tax_inclusive: row.tax_inclusive ?? false,
       barcodes: barcodes.get(productId) ?? [],
+      conversions: conversions.get(productId) ?? [],
     };
   }
 
@@ -117,10 +146,33 @@ export class CatalogService {
     return grouped;
   }
 
+  /**
+   * Pack sizes keyed by product id (item 4.6), ordered so a device caches them deterministically.
+   * `factor` arrives from Postgres as a numeric string, so it is coerced exactly once, here.
+   */
+  private async conversionsFor(trx: Kysely<Database>, tenantId: string, productIds: string[]): Promise<Map<string, ProductConversion[]>> {
+    const grouped = new Map<string, ProductConversion[]>();
+    if (productIds.length === 0) return grouped;
+    const rows = await trx
+      .selectFrom('unit_conversions')
+      .select(['product_id', 'unit', 'factor'])
+      .where('tenant_id', '=', tenantId)
+      .where('product_id', 'in', productIds)
+      .orderBy('unit', 'asc')
+      .execute();
+    for (const row of rows) {
+      const list = grouped.get(row.product_id) ?? [];
+      list.push({ unit: row.unit, factor: Number(row.factor) });
+      grouped.set(row.product_id, list);
+    }
+    return grouped;
+  }
+
   async listProducts(tenantId: string, limit: number, offset: number, updatedSince?: string) {
     let query = this.dbs.db
       .selectFrom('products')
       .leftJoin('tax_categories', 'tax_categories.id', 'products.tax_category_id')
+      .leftJoin('brands', 'brands.id', 'products.brand_id')
       .select([
         'products.id',
         'products.sku',
@@ -128,6 +180,7 @@ export class CatalogService {
         'products.description',
         'products.category_id',
         'products.tax_category_id',
+        'products.brand_id',
         'products.unit',
         'products.is_stock_tracked',
         'products.is_active',
@@ -137,14 +190,25 @@ export class CatalogService {
         'products.updated_at',
         'tax_categories.rate_bp as tax_rate_bp',
         'tax_categories.inclusive as tax_inclusive',
+        'brands.name as brand_name',
       ])
       .where('products.tenant_id', '=', tenantId)
       .where('products.deleted_at', 'is', null);
     if (updatedSince) query = query.where('products.updated_at', '>', new Date(updatedSince));
     const rows = await query.orderBy('products.sku', 'asc').limit(limit).offset(offset).execute();
     const barcodes = await this.barcodesFor(this.dbs.db, tenantId, rows.map((r) => r.id));
+    const conversions = await this.conversionsFor(this.dbs.db, tenantId, rows.map((r) => r.id));
+    const unitKinds = await this.unitKindsFor(this.dbs.db, tenantId);
     return {
-      products: rows.map((row) => ({ ...row, barcodes: barcodes.get(row.id) ?? [] })),
+      products: rows.map((row) => ({
+        ...row,
+        brand_name: row.brand_name ?? null,
+        // Null when the product's unit is not in the vocabulary — a device must be able to tell
+        // "no rule" from "counted", never invent one (item 4.6).
+        unit_kind: unitKinds.get(String(row.unit).trim().toLowerCase()) ?? null,
+        barcodes: barcodes.get(row.id) ?? [],
+        conversions: conversions.get(row.id) ?? [],
+      })),
       limit,
       offset,
     };
@@ -156,6 +220,15 @@ export class CatalogService {
       const dup = await trx.selectFrom('products').select('id').where('tenant_id', '=', tenantId).where('sku', '=', input.sku).executeTakeFirst();
       if (dup) throw AppError.conflict('DUPLICATE_SKU', `SKU ${input.sku} already exists`);
 
+      if (input.categoryId) await this.assertTenanted(trx, tenantId, 'categories', input.categoryId, 'UNKNOWN_CATEGORY');
+      if (input.taxCategoryId) await this.assertTenanted(trx, tenantId, 'tax_categories', input.taxCategoryId, 'UNKNOWN_TAX_CATEGORY');
+      if (input.brandId) await this.assertTenanted(trx, tenantId, 'brands', input.brandId, 'UNKNOWN_BRAND');
+
+      const unit = input.unit ?? 'ea';
+      // Validated before anything is written: a product with a pack size it could never convert is
+      // a product whose next receipt would land in the wrong unit (item 4.6).
+      const conversions = await this.validateConversions(trx, tenantId, unit, input.conversions ?? []);
+
       await trx
         .insertInto('products')
         .values({
@@ -166,7 +239,8 @@ export class CatalogService {
           description: input.description ?? null,
           category_id: input.categoryId ?? null,
           tax_category_id: input.taxCategoryId ?? null,
-          unit: input.unit ?? 'ea',
+          brand_id: input.brandId ?? null,
+          unit,
           is_stock_tracked: input.isStockTracked ?? true,
           price_minor: input.priceMinor ?? 0,
           cost_minor: input.costMinor ?? 0,
@@ -174,9 +248,80 @@ export class CatalogService {
         .execute();
 
       await this.replaceBarcodes(trx, tenantId, id, input.barcodes ?? []);
+      // Absent means "no conversions wanted", which is exactly an empty set on a new product.
+      if (input.conversions !== undefined) await this.writeConversions(trx, tenantId, id, conversions);
 
       return this.recordProductChange(trx, tenantId, actorId, correlationId, 'product.created', id);
     });
+  }
+
+  /**
+   * Conversion sets are replaced, never merged — the same rule as barcodes (item 4.1): what the
+   * caller sent is exactly what this product converts from, so a pack size can be retired by
+   * sending a set without it.
+   *
+   * Every factor is checked against the tenant's unit catalogue and the product's BASE unit:
+   * `1 crate = 24 ea` is only knowable if "crate" exists and "ea" is a real, typed unit — a
+   * conversion to something the ledger does not hold stock in would silently invent quantity.
+   */
+  private async validateConversions(
+    trx: Kysely<Database>,
+    tenantId: string,
+    baseUnit: string,
+    requested: ProductConversion[],
+  ): Promise<ProductConversion[]> {
+    const desired = new Map<string, ProductConversion>();
+    for (const entry of requested) {
+      const unit = String(entry?.unit ?? '').trim();
+      if (unit.length === 0) throw new AppError('UNKNOWN_UNIT', 'A conversion needs a unit', 400);
+      if (unit.length > 16) throw new AppError('UNKNOWN_UNIT', `Unit "${unit}" may be at most 16 characters`, 400);
+      desired.set(unit.toLowerCase(), { unit, factor: Number(entry.factor) });
+    }
+    if (desired.size === 0) return [];
+
+    const base = baseUnit.trim().toLowerCase();
+    const known = new Map(
+      (await trx.selectFrom('units_of_measure').select(['code', 'kind']).where('tenant_id', '=', tenantId).execute()).map((u) => [
+        u.code.toLowerCase(),
+        u,
+      ]),
+    );
+
+    if (!known.has(base)) {
+      throw new AppError(
+        'UNKNOWN_UNIT',
+        `Selling unit "${baseUnit}" is not in this shop's unit catalogue. Add it under Units before giving the product pack sizes.`,
+        400,
+      );
+    }
+    for (const entry of desired.values()) {
+      const key = entry.unit.toLowerCase();
+      if (key === base) {
+        throw new AppError(
+          'SELF_CONVERSION',
+          `A pack size of "${entry.unit}" would convert into itself — the selling unit is already ${baseUnit}`,
+          400,
+        );
+      }
+      if (!known.has(key)) {
+        throw new AppError('UNKNOWN_UNIT', `Unknown unit "${entry.unit}" — add it under Units before converting to it`, 400);
+      }
+      if (!Number.isFinite(entry.factor) || entry.factor <= 0) {
+        throw new AppError('INVALID_FACTOR', `How many ${baseUnit} make one ${entry.unit}? That number must be more than zero`, 400);
+      }
+    }
+    return [...desired.values()];
+  }
+
+  /** Replace the stored conversion set in one go, inside the caller's transaction. */
+  private async writeConversions(trx: Kysely<Database>, tenantId: string, productId: string, entries: ProductConversion[]) {
+    await trx.deleteFrom('unit_conversions').where('tenant_id', '=', tenantId).where('product_id', '=', productId).execute();
+    for (const entry of entries) {
+      await trx
+        .insertInto('unit_conversions')
+        .values({ tenant_id: tenantId, product_id: productId, unit: entry.unit, factor: entry.factor })
+        .execute();
+    }
   }
 
   /**
@@ -256,6 +401,19 @@ export class CatalogService {
         if (dup) throw AppError.conflict('DUPLICATE_SKU', `SKU ${input.sku} already exists`);
       }
 
+      const nextUnit = input.unit ?? current.unit;
+      const unitChanged = nextUnit !== current.unit;
+      if (input.categoryId) await this.assertTenanted(trx, tenantId, 'categories', input.categoryId, 'UNKNOWN_CATEGORY');
+      if (input.taxCategoryId) await this.assertTenanted(trx, tenantId, 'tax_categories', input.taxCategoryId, 'UNKNOWN_TAX_CATEGORY');
+      if (input.brandId) await this.assertTenanted(trx, tenantId, 'brands', input.brandId, 'UNKNOWN_BRAND');
+      // The pack sizes must still make sense against the NEW base unit: retargeting a product from
+      // `ea` to `crate` while it converts `crate -> ea` would leave a conversion that converts the
+      // unit into itself. Validate whatever will be stored, whether or not this call sent a set.
+      const desiredConversions =
+        input.conversions ??
+        (unitChanged ? ((await this.conversionsFor(trx, tenantId, [productId])).get(productId) ?? []) : null);
+      const conversions = desiredConversions === null ? null : await this.validateConversions(trx, tenantId, nextUnit, desiredConversions);
+
       const before = await this.productPayload(trx, tenantId, productId);
       await trx
         .updateTable('products')
@@ -265,7 +423,8 @@ export class CatalogService {
           description: input.description === undefined ? current.description : input.description,
           category_id: input.categoryId === undefined ? current.category_id : input.categoryId,
           tax_category_id: input.taxCategoryId === undefined ? current.tax_category_id : input.taxCategoryId,
-          unit: input.unit ?? current.unit,
+          brand_id: input.brandId === undefined ? current.brand_id : input.brandId,
+          unit: nextUnit,
           is_stock_tracked: input.isStockTracked ?? current.is_stock_tracked,
           is_active: input.isActive ?? current.is_active,
           price_minor: input.priceMinor ?? current.price_minor,
@@ -278,6 +437,8 @@ export class CatalogService {
 
       // Replace the barcode set when the caller supplied one (item 4.1).
       if (input.barcodes !== undefined) await this.replaceBarcodes(trx, tenantId, productId, input.barcodes);
+      // Same rule for conversions: present means replace (item 4.6).
+      if (conversions !== null) await this.writeConversions(trx, tenantId, productId, conversions);
 
       return this.recordProductChange(trx, tenantId, actorId, correlationId, 'product.updated', productId, before);
     });
@@ -294,11 +455,20 @@ export class CatalogService {
     tenantId: string,
     actorId: string,
     correlationId: string,
-    input: { csv?: string; records?: unknown[]; commit: boolean; createMissingCategories: boolean },
+    input: {
+      csv?: string;
+      records?: unknown[];
+      commit: boolean;
+      createMissingCategories: boolean;
+      createMissingBrands: boolean;
+    },
   ) {
     const parsed = input.csv !== undefined ? parseCsv(input.csv) : recordsToCsvRows(input.records ?? []);
     const reference = await this.importReference(tenantId);
-    const plan = planProductImport(parsed, reference, { createMissingCategories: input.createMissingCategories });
+    const plan = planProductImport(parsed, reference, {
+      createMissingCategories: input.createMissingCategories,
+      createMissingBrands: input.createMissingBrands,
+    });
 
     const report = {
       status: (plan.errors.length > 0 ? 'invalid' : input.commit ? 'committed' : 'validated') as 'invalid' | 'committed' | 'validated',
@@ -308,6 +478,7 @@ export class CatalogService {
       createCount: plan.createCount,
       updateCount: plan.updateCount,
       categoriesToCreate: plan.categoriesToCreate,
+      brandsToCreate: plan.brandsToCreate,
       errors: plan.errors,
       previewTruncated: plan.rows.length > 100,
       preview: plan.rows.slice(0, 100).map((row) => ({
@@ -316,6 +487,7 @@ export class CatalogService {
         sku: row.sku,
         name: row.name,
         category: row.categoryName,
+        brand: row.brandName,
         unit: row.unit,
         priceMinor: row.priceMinor,
         costMinor: row.costMinor,
@@ -343,8 +515,25 @@ export class CatalogService {
         });
       }
 
+      const brandIdByName = new Map([...reference.brandsByName].map(([key, value]) => [key, value.id] as const));
+      for (const name of plan.brandsToCreate) {
+        const id = newId();
+        await trx.insertInto('brands').values({ id, tenant_id: tenantId, name }).execute();
+        brandIdByName.set(name.toLowerCase(), id);
+        await this.events.audit(trx, {
+          tenantId,
+          actorId,
+          action: 'brand.created',
+          aggregateType: 'Brand',
+          aggregateId: id,
+          after: { name, source: 'import' },
+          correlationId,
+        });
+      }
+
       for (const row of plan.rows) {
         const categoryId = row.categoryName ? categoryIdByName.get(row.categoryName.toLowerCase()) ?? null : null;
+        const brandId = row.brandName ? brandIdByName.get(row.brandName.toLowerCase()) ?? null : null;
         if (row.action === 'create') {
           const id = newId();
           await trx
@@ -357,6 +546,7 @@ export class CatalogService {
               description: row.description,
               category_id: categoryId,
               tax_category_id: row.taxCategoryId,
+              brand_id: brandId,
               unit: row.unit,
               is_stock_tracked: row.isStockTracked,
               is_active: row.isActive,
@@ -372,14 +562,17 @@ export class CatalogService {
           await trx
             .updateTable('products')
             .set({
-              // The file is the desired state of the columns it carries. The barcode column is the one
-              // exception: when the file has no barcode column at all, the stored set is left alone
-              // rather than wiped because someone omitted a column (see PlannedProductRow.barcodes).
+              // The file is the desired state of the columns it carries, category, brand and tax rate
+              // included: a file with no `brand` column clears the brand exactly as it clears the
+              // category. The barcode column is the one exception: when the file has no barcode
+              // column at all, the stored set is left alone rather than wiped because someone
+              // omitted a column (see PlannedProductRow.barcodes).
               sku: row.sku,
               name: row.name,
               description: row.description,
               category_id: categoryId,
               tax_category_id: row.taxCategoryId,
+              brand_id: brandId,
               unit: row.unit,
               is_stock_tracked: row.isStockTracked,
               is_active: row.isActive,
@@ -408,6 +601,7 @@ export class CatalogService {
           createCount: plan.createCount,
           updateCount: plan.updateCount,
           categoriesCreated: plan.categoriesToCreate,
+          brandsCreated: plan.brandsToCreate,
           source: input.csv !== undefined ? 'csv' : 'records',
         },
         correlationId,
@@ -422,11 +616,12 @@ export class CatalogService {
    * row: an import of a few thousand rows must not become a few thousand round-trips.
    */
   private async importReference(tenantId: string): Promise<ImportReferenceData> {
-    const [products, barcodes, taxCategories, categories] = await Promise.all([
+    const [products, barcodes, taxCategories, categories, brands] = await Promise.all([
       this.dbs.db.selectFrom('products').select(['id', 'sku']).where('tenant_id', '=', tenantId).where('deleted_at', 'is', null).execute(),
       this.dbs.db.selectFrom('barcodes').select(['barcode', 'product_id']).where('tenant_id', '=', tenantId).execute(),
       this.dbs.db.selectFrom('tax_categories').select(['id', 'name']).where('tenant_id', '=', tenantId).execute(),
       this.dbs.db.selectFrom('categories').select(['id', 'name']).where('tenant_id', '=', tenantId).execute(),
+      this.dbs.db.selectFrom('brands').select(['id', 'name']).where('tenant_id', '=', tenantId).execute(),
     ]);
 
     // SKUs are matched ignoring case (a shopkeeper writes "milk-1l" and "MILK-1L" meaning one product).
@@ -451,6 +646,7 @@ export class CatalogService {
       barcodeOwner: new Map(barcodes.map((row) => [row.barcode, row.product_id])),
       taxCategoriesByName: new Map(taxCategories.map((row) => [row.name.toLowerCase(), { id: row.id, name: row.name }])),
       categoriesByName: new Map(categories.map((row) => [row.name.toLowerCase(), { id: row.id, name: row.name }])),
+      brandsByName: new Map(brands.map((row) => [row.name.toLowerCase(), { id: row.id, name: row.name }])),
     };
   }
 
@@ -519,12 +715,141 @@ export class CatalogService {
     });
   }
 
+  /**
+   * A UUID is not proof of tenancy (§9): before a product points at reference data, that data must
+   * belong to THIS tenant. Brands arrive with item 4.6, but categories and tax rates are written
+   * through the same two endpoints, so all three are checked the same way.
+   */
+  private async assertTenanted(
+    trx: Kysely<Database>,
+    tenantId: string,
+    table: 'categories' | 'brands' | 'tax_categories',
+    id: string,
+    code: string,
+  ): Promise<void> {
+    const found = await sql<{ exists: boolean }>`
+      SELECT EXISTS (
+        SELECT 1 FROM ${sql.table(table)} WHERE id = ${id} AND tenant_id = ${tenantId}
+      ) AS exists
+    `.execute(trx);
+    if (!found.rows[0]?.exists) throw AppError.notFound(code, 'That record does not belong to this shop');
+  }
+
+  // --- units of measure (item 4.6) --------------------------------------------------------------
+
+  /**
+   * The `kind` of a product's base unit (`count`, `weight`, `volume`), or null when that unit is not
+   * in the shop's vocabulary. Shipped on the product payload because the conversion rule belongs to
+   * the product's pack sizes: a device must be able to tell a crate count that has to land whole
+   * from a weigh that need not, on the same pull that brings the factors, without the network (§6).
+   */
+  private async unitKindFor(db: Kysely<Database>, tenantId: string, unit: string): Promise<string | null> {
+    const row = await db
+      .selectFrom('units_of_measure')
+      .select('kind')
+      .where('tenant_id', '=', tenantId)
+      .where(sql<string>`lower(code)`, '=', unit.trim().toLowerCase())
+      .executeTakeFirst();
+    return row?.kind ?? null;
+  }
+
+  /** Every base-unit kind for a tenant, keyed by lower-cased code: one query for a page of products. */
+  private async unitKindsFor(db: Kysely<Database>, tenantId: string): Promise<Map<string, string>> {
+    const rows = await db.selectFrom('units_of_measure').select(['code', 'kind']).where('tenant_id', '=', tenantId).execute();
+    return new Map(rows.map((row) => [row.code.toLowerCase(), row.kind]));
+  }
+
+  /**
+   * The unit catalogue: the vocabulary a quantity may be written in, and — through `kind` — what the
+   * ledger will accept for the product's base unit (`count` stays whole, `weight`/`volume` may not).
+   */
+  async listUnits(tenantId: string) {
+    const units = await this.dbs.db
+      .selectFrom('units_of_measure')
+      .select(['id', 'code', 'name', 'kind', 'created_at'])
+      .where('tenant_id', '=', tenantId)
+      .orderBy('code', 'asc')
+      .execute();
+    return { units };
+  }
+
+  async createUnit(tenantId: string, actorId: string, correlationId: string, input: { id?: string; code: string; name: string; kind: string }) {
+    const code = input.code.trim().toLowerCase();
+    const name = input.name.trim();
+    if (code.length === 0) throw new AppError('INVALID_UNIT', 'A unit needs a short code such as ea, kg or crate', 400);
+    if (!UNIT_KINDS.includes(input.kind as UnitKind)) {
+      throw new AppError('UNKNOWN_UNIT_KIND', `Kind must be one of: ${UNIT_KINDS.join(', ')}`, 400);
+    }
+    const existing = await this.dbs.db.selectFrom('units_of_measure').select('code').where('tenant_id', '=', tenantId).execute();
+    if (existing.some((u) => u.code.toLowerCase() === code)) {
+      throw AppError.conflict('DUPLICATE_UNIT', `Unit "${code}" already exists`);
+    }
+
+    const id = input.id ?? newId();
+    return this.dbs.transaction(async (trx) => {
+      await trx
+        .insertInto('units_of_measure')
+        .values({ id, tenant_id: tenantId, code, name, kind: input.kind })
+        .execute();
+      await this.events.audit(trx, {
+        tenantId,
+        actorId,
+        action: 'unit.created',
+        aggregateType: 'UnitOfMeasure',
+        aggregateId: id,
+        after: { code, name, kind: input.kind },
+        correlationId,
+      });
+      return trx.selectFrom('units_of_measure').selectAll().where('id', '=', id).executeTakeFirstOrThrow();
+    });
+  }
+
+  // --- brands (§3.C product master, item 4.6) ---------------------------------------------------
+
+  async listBrands(tenantId: string) {
+    const brands = await this.dbs.db
+      .selectFrom('brands')
+      .select(['id', 'name', 'created_at'])
+      .where('tenant_id', '=', tenantId)
+      .orderBy('name', 'asc')
+      .execute();
+    return { brands };
+  }
+
+  async createBrand(tenantId: string, actorId: string, correlationId: string, input: { id?: string; name: string }) {
+    const name = input.name.trim();
+    if (name.length === 0) throw new AppError('INVALID_BRAND', 'A brand needs a name', 400);
+    const existing = await this.dbs.db.selectFrom('brands').select('name').where('tenant_id', '=', tenantId).execute();
+    // "Coca" and "COCA" are one brand to a shopkeeper, so the check ignores case just as the
+    // unique index behind it does.
+    if (existing.some((b) => b.name.toLowerCase() === name.toLowerCase())) {
+      throw AppError.conflict('DUPLICATE_BRAND', `Brand "${name}" already exists`);
+    }
+
+    const id = input.id ?? newId();
+    return this.dbs.transaction(async (trx) => {
+      await trx.insertInto('brands').values({ id, tenant_id: tenantId, name }).execute();
+      await this.events.audit(trx, {
+        tenantId,
+        actorId,
+        action: 'brand.created',
+        aggregateType: 'Brand',
+        aggregateId: id,
+        after: { name },
+        correlationId,
+      });
+      return trx.selectFrom('brands').selectAll().where('id', '=', id).executeTakeFirstOrThrow();
+    });
+  }
+
   /** Everything a device needs to operate offline (§6 local database responsibilities). */
   async configSnapshot(tenantId: string) {
-    const [branches, taxCategories, categories, license, numbering, head] = await Promise.all([
+    const [branches, taxCategories, categories, units, brands, license, numbering, head] = await Promise.all([
       this.dbs.db.selectFrom('branches').select(['id', 'code', 'name']).where('tenant_id', '=', tenantId).execute(),
       this.dbs.db.selectFrom('tax_categories').selectAll().where('tenant_id', '=', tenantId).execute(),
       this.dbs.db.selectFrom('categories').selectAll().where('tenant_id', '=', tenantId).execute(),
+      this.dbs.db.selectFrom('units_of_measure').selectAll().where('tenant_id', '=', tenantId).execute(),
+      this.dbs.db.selectFrom('brands').selectAll().where('tenant_id', '=', tenantId).execute(),
       this.dbs.db.selectFrom('licenses').selectAll().where('tenant_id', '=', tenantId).executeTakeFirst(),
       this.dbs.db.selectFrom('numbering_series').selectAll().where('tenant_id', '=', tenantId).execute(),
       this.dbs.db.selectFrom('server_events').select(({ fn }) => fn.max<number>('seq').as('max')).where('tenant_id', '=', tenantId).executeTakeFirst(),
@@ -535,6 +860,8 @@ export class CatalogService {
       branches,
       taxCategories,
       categories,
+      units,
+      brands,
       numberingSeries: numbering,
       license: license ?? null,
       serverCursor: Number(head?.max ?? 0),

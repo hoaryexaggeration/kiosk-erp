@@ -61,6 +61,7 @@ import android.content.Context
 import android.net.Uri
 import android.provider.OpenableColumns
 import com.kiosk.erp.core.common.Pricing
+import com.kiosk.erp.core.common.Units
 import com.kiosk.erp.core.database.ProductEntity
 import com.kiosk.erp.core.designsystem.Banner
 import com.kiosk.erp.core.designsystem.EmptyState
@@ -311,7 +312,8 @@ private fun ProductRow(product: ProductEntity, onEdit: () -> Unit, onToggleActiv
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 Text(
-                    "cost ${Pricing.formatMinor(product.costMinor)} KES • tax ${product.taxRateBp / 100.0}%" +
+                    (product.brandName?.let { "$it • " } ?: "") +
+                        "cost ${Pricing.formatMinor(product.costMinor)} KES • tax ${product.taxRateBp / 100.0}%" +
                         if (!product.isStockTracked) " • not stock-tracked" else "",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -402,10 +404,79 @@ private fun ProductEditorScreen(editor: ProductEditorState, meta: CatalogMeta, v
         Spacer(Modifier.height(StackGap))
         SectionTitle("Selling unit")
         Spacer(Modifier.height(6.dp))
-        OutlinedTextField(editor.unit, { v -> vm.edit { it.copy(unit = v) } }, label = { Text("Unit (ea, kg, l)") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+        if (meta.units.isNotEmpty()) {
+            // Picked from the shop's vocabulary rather than typed: `ea`, `kg` and `crate` have to be
+            // the same words the server knows, or a receipt in them would be refused on arrival.
+            PickerField(
+                label = "Stock is held in",
+                selectedLabel = meta.units.firstOrNull { it.code.equals(editor.unit, ignoreCase = true) }?.label ?: editor.unit,
+                options = buildList {
+                    meta.units.forEach { unit ->
+                        add(PickerOption(unit.label) { vm.edit { it.copy(unit = unit.code) } })
+                    }
+                },
+            )
+        } else {
+            OutlinedTextField(
+                editor.unit,
+                { v -> vm.edit { it.copy(unit = v) } },
+                label = { Text("Unit (ea, kg, l)") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Spacer(Modifier.height(4.dp))
+            Hint("No unit list loaded — connect once and open Manage to pick units from the shop's list.", tone = Tone.Warning)
+        }
 
         Spacer(Modifier.height(StackGap))
-        SectionTitle("Category & tax")
+        SectionTitle(
+            "Pack sizes",
+            caption = "Bought by the crate, sold by the ${editor.unit}: a pack size only converts into the unit above — " +
+                "stock itself is always held there.",
+        )
+        Spacer(Modifier.height(4.dp))
+        if (editor.conversions.isEmpty()) {
+            Text(
+                "None yet, so receipts and adjustments can only be entered in ${editor.unit}.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        editor.conversions.forEach { conversion ->
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(vertical = 2.dp)) {
+                Text(editor.conversionLabel(conversion), modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
+                IconButton(onClick = { vm.removeConversion(conversion.unit) }) {
+                    Icon(Icons.Filled.Delete, contentDescription = "Remove the ${conversion.unit} pack size")
+                }
+            }
+        }
+        Spacer(Modifier.height(4.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(StackGap)) {
+            OutlinedTextField(
+                editor.newConversionUnit,
+                { v -> vm.edit { it.copy(newConversionUnit = v) } },
+                label = { Text("Pack unit, e.g. crate") },
+                singleLine = true,
+                modifier = Modifier.weight(1f),
+            )
+            OutlinedTextField(
+                editor.newConversionFactor,
+                { v -> vm.edit { it.copy(newConversionFactor = v) } },
+                label = { Text("= how many ${editor.unit}") },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                modifier = Modifier.weight(1f),
+            )
+        }
+        Spacer(Modifier.height(8.dp))
+        Button(
+            onClick = vm::addConversion,
+            enabled = editor.newConversionUnit.isNotBlank() && editor.newConversionFactor.isNotBlank(),
+            modifier = Modifier.fillMaxWidth().heightIn(min = 46.dp),
+        ) { Text("Add pack size") }
+
+        Spacer(Modifier.height(StackGap))
+        SectionTitle("Category, brand & tax")
         Spacer(Modifier.height(6.dp))
         PickerField(
             label = "Category",
@@ -417,6 +488,21 @@ private fun ProductEditorScreen(editor: ProductEditorState, meta: CatalogMeta, v
                 }
             },
         )
+        Spacer(Modifier.height(8.dp))
+        PickerField(
+            label = "Brand",
+            selectedLabel = meta.brands.firstOrNull { it.id == editor.brandId }?.name,
+            options = buildList {
+                add(PickerOption("— none —") { vm.edit { it.copy(brandId = null) } })
+                meta.brands.forEach { brand ->
+                    add(PickerOption(brand.name) { vm.edit { it.copy(brandId = brand.id) } })
+                }
+            },
+        )
+        if (meta.brands.isEmpty()) {
+            Spacer(Modifier.height(4.dp))
+            Hint("No brands yet — add them under Manage so imports and the list can name who makes this.")
+        }
         Spacer(Modifier.height(8.dp))
         PickerField(
             label = "Tax rate",
@@ -501,9 +587,9 @@ private fun SwitchRow(title: String, subtitle: String, checked: Boolean, onChang
 }
 
 @Composable
-private fun PickerField(label: String, selectedLabel: String?, options: List<PickerOption>) {
+private fun PickerField(label: String, selectedLabel: String?, options: List<PickerOption>, modifier: Modifier = Modifier) {
     var expanded by remember { mutableStateOf(false) }
-    Column(Modifier.fillMaxWidth()) {
+    Column(modifier.fillMaxWidth()) {
         Text(label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Box {
             OutlinedButton(onClick = { expanded = true }, modifier = Modifier.fillMaxWidth().heightIn(min = 46.dp)) {
@@ -547,8 +633,11 @@ private fun ImportPreviewScreen(state: ImportState, vm: CatalogViewModel) {
                     fontWeight = FontWeight.SemiBold,
                 )
                 Text(
-                    "${report.createCount} new, ${report.updateCount} updated" +
-                        if (report.categoriesToCreate.isEmpty()) "" else " • categories to create: ${report.categoriesToCreate.joinToString(", ")}",
+                    buildString {
+                        append("${report.createCount} new, ${report.updateCount} updated")
+                        if (report.categoriesToCreate.isNotEmpty()) append(" • categories to create: ${report.categoriesToCreate.joinToString(", ")}")
+                        if (report.brandsToCreate.isNotEmpty()) append(" • brands to create: ${report.brandsToCreate.joinToString(", ")}")
+                    },
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -565,6 +654,13 @@ private fun ImportPreviewScreen(state: ImportState, vm: CatalogViewModel) {
                         "Categories are labels; a missing tax rate is always an error.",
                         state.createMissingCategories,
                     ) { vm.setImportCreateMissingCategories(it) }
+                }
+                if (report.brandsToCreate.isNotEmpty()) {
+                    SwitchRow(
+                        "Create the missing brands",
+                        "A brand the file names does not exist yet — create it, or fix the file to use one you already have.",
+                        state.createMissingBrands,
+                    ) { vm.setImportCreateMissingBrands(it) }
                 }
                 Spacer(Modifier.height(StackGap))
 
@@ -635,9 +731,13 @@ private fun ManageCatalogueScreen(meta: CatalogMeta, onBack: () -> Unit, vm: Cat
     var newTaxName by remember { mutableStateOf("") }
     var newTaxRate by remember { mutableStateOf("") }
     var newTaxInclusive by remember { mutableStateOf(true) }
+    var newUnitCode by remember { mutableStateOf("") }
+    var newUnitName by remember { mutableStateOf("") }
+    var newUnitKind by remember { mutableStateOf(Units.KIND_COUNT) }
+    var newBrand by remember { mutableStateOf("") }
 
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(ScreenPadding)) {
-        ScreenHeader(title = "Categories & tax rates", onBack = onBack)
+        ScreenHeader(title = "Categories, tax, units & brands", onBack = onBack)
         meta.message?.let {
             Spacer(Modifier.height(StackGap))
             Banner(
@@ -723,6 +823,84 @@ private fun ManageCatalogueScreen(meta: CatalogMeta, onBack: () -> Unit, vm: Cat
             "A rate can only be added, not silently edited: changing what a shop charges mid-year is a " +
                 "reporting question, so it needs the owner to decide what happens to prices already on the shelf.",
         )
+
+        Spacer(Modifier.height(StackGap))
+        HorizontalDivider()
+        Spacer(Modifier.height(StackGap))
+
+        SectionTitle("Units of measure", caption = "The words every quantity is written in — chosen here so a receipt in crates means the same thing everywhere.")
+        Spacer(Modifier.height(6.dp))
+        if (meta.units.isEmpty()) {
+            Text("None yet — a product cannot take pack sizes until at least its own unit exists.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+        }
+        meta.units.forEach { unit ->
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(vertical = 3.dp)) {
+                Text(unit.code, fontWeight = FontWeight.SemiBold, modifier = Modifier.width(72.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(unit.name, style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        if (unit.kind == Units.KIND_COUNT) "counted — quantities in it stay whole"
+                        else "measured — quantities in it may be fractional",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Pill(unit.kind, if (unit.kind == Units.KIND_COUNT) Tone.Info else Tone.Neutral)
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(StackGap)) {
+            OutlinedTextField(newUnitCode, { newUnitCode = it }, label = { Text("Code") }, singleLine = true, modifier = Modifier.weight(1f))
+            OutlinedTextField(newUnitName, { newUnitName = it }, label = { Text("Name") }, singleLine = true, modifier = Modifier.weight(1.6f))
+        }
+        Spacer(Modifier.height(8.dp))
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(StackGap)) {
+            PickerField(
+                label = "Kind",
+                selectedLabel = newUnitKind,
+                options = listOf(
+                    PickerOption("count") { newUnitKind = Units.KIND_COUNT },
+                    PickerOption("weight") { newUnitKind = Units.KIND_WEIGHT },
+                    PickerOption("volume") { newUnitKind = Units.KIND_VOLUME },
+                ),
+                modifier = Modifier.weight(1f),
+            )
+            Button(
+                onClick = {
+                    vm.createUnit(newUnitCode, newUnitName.ifBlank { newUnitCode }, newUnitKind)
+                    newUnitCode = ""
+                    newUnitName = ""
+                },
+                enabled = newUnitCode.isNotBlank(),
+                modifier = Modifier.heightIn(min = 46.dp).align(Alignment.Bottom),
+            ) { Text("Add unit") }
+        }
+
+        Spacer(Modifier.height(StackGap))
+        HorizontalDivider()
+        Spacer(Modifier.height(StackGap))
+
+        SectionTitle("Brands", caption = "Who makes a product. One name, whatever the capital letters — an import file matches on it.")
+        Spacer(Modifier.height(6.dp))
+        if (meta.brands.isEmpty()) {
+            Text("None yet.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        meta.brands.forEach { brand ->
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(vertical = 3.dp)) {
+                Text(brand.name, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+            }
+        }
+        Spacer(Modifier.height(4.dp))
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(StackGap)) {
+            OutlinedTextField(
+                newBrand,
+                { newBrand = it },
+                label = { Text("New brand") },
+                singleLine = true,
+                modifier = Modifier.weight(1f),
+            )
+            Button(onClick = { vm.createBrand(newBrand); newBrand = "" }, enabled = newBrand.isNotBlank()) { Text("Add") }
+        }
         Spacer(Modifier.height(24.dp))
     }
 }

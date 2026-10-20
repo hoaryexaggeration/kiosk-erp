@@ -42,12 +42,23 @@ class InventoryRepository(private val db: KioskDatabase) {
     /**
      * Queue a stock adjustment. `reason` is mandatory — an unexplained movement is not a fact we
      * are willing to post (mirrors the server's `StockAdjustment` contract).
+     *
+     * Item 4.6: an adjustment may be WRITTEN in a pack (`10 crate`) and is posted that way, so the
+     * server converts it and records both numbers on the movement. The device never converts for the
+     * ledger — it only reports the base-unit effect it believes will happen, which is what the local
+     * on-hand projection needs to stay honest until the next pull.
+     *
+     * @param enteredQuantityDelta the quantity as the operator typed it, in `unit`
+     * @param unit the pack they typed it in, or null for the product's base unit
+     * @param baseQuantityDelta the effect in base units, already converted by `Units` for the preview
      */
     suspend fun createAdjustment(
         productId: String,
         sku: String,
         name: String,
-        quantityDelta: Double,
+        enteredQuantityDelta: Double,
+        unit: String?,
+        baseQuantityDelta: Double,
         reason: String,
         branchId: String,
         deviceId: String,
@@ -62,7 +73,8 @@ class InventoryRepository(private val db: KioskDatabase) {
                 put("lines", buildJsonArray {
                     add(buildJsonObject {
                         put("productId", productId)
-                        put("quantityDelta", quantityDelta)
+                        put("quantityDelta", enteredQuantityDelta)
+                        if (unit != null) put("unit", unit)
                     })
                 })
             })
@@ -72,13 +84,13 @@ class InventoryRepository(private val db: KioskDatabase) {
             val existing = db.inventoryDao().byProduct(productId)
             db.inventoryDao().upsertAll(
                 listOf(
-                    existing?.copy(quantity = existing.quantity + quantityDelta, updatedAtEpochMs = now)
+                    existing?.copy(quantity = existing.quantity + baseQuantityDelta, updatedAtEpochMs = now)
                         ?: StockBalanceEntity(
                             productId = productId,
                             branchId = branchId,
                             sku = sku,
                             name = name,
-                            quantity = quantityDelta,
+                            quantity = baseQuantityDelta,
                             updatedAtEpochMs = now,
                         ),
                 ),

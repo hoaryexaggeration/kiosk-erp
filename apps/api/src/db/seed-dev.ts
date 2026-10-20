@@ -41,6 +41,37 @@ export const DEMO_CATEGORIES = [
   { id: 'cccccccc-0000-4000-8000-000000000005', name: 'Personal care' },
 ] as const;
 
+/**
+ * The demo tenant's unit catalogue (item 4.6). A conversion may only name a unit that appears
+ * here, and `kind` decides what the ledger accepts: a `count` base stays whole, `weight` and
+ * `volume` may be fractional. Every real tenant needs this set once — `seedDev` is the only place
+ * a tenant is created today, so it is also where the catalogue is guaranteed to exist.
+ */
+export const DEMO_UNITS = [
+  { code: 'ea', name: 'Each', kind: 'count' },
+  { code: 'bottle', name: 'Bottle', kind: 'count' },
+  { code: 'crate', name: 'Crate', kind: 'count' },
+  { code: 'pack', name: 'Pack', kind: 'count' },
+  { code: 'tray', name: 'Tray', kind: 'count' },
+  { code: 'kg', name: 'Kilogram', kind: 'weight' },
+  { code: 'g', name: 'Gram', kind: 'weight' },
+  { code: 'l', name: 'Litre', kind: 'volume' },
+  { code: 'ml', name: 'Millilitre', kind: 'volume' },
+] as const;
+
+/** Brands the demo products belong to (§3.C product master). Loose produce is deliberately unbranded. */
+export const DEMO_BRANDS = [
+  { id: 'bbbbbbbb-0000-4000-8000-000000000001', name: 'Savannah Foods' },
+  { id: 'bbbbbbbb-0000-4000-8000-000000000002', name: 'Kaskazi Drinks' },
+  { id: 'bbbbbbbb-0000-4000-8000-000000000003', name: 'Neema Home' },
+] as const;
+
+/** One pack size a product really is bought in: `1 <unit> = <factor> base units` (item 4.6). */
+export interface DemoConversion {
+  unit: string;
+  factor: number;
+}
+
 export interface DemoProduct {
   /** Deterministic id suffix. */
   n: number;
@@ -48,7 +79,11 @@ export interface DemoProduct {
   name: string;
   description?: string;
   category: string | null;
+  /** The BASE unit: the only unit stock of this product is ever held in (item 4.6). */
   unit: string;
+  brand?: string;
+  /** Pack sizes this product is bought in, expressed against `unit`. */
+  conversions?: DemoConversion[];
   priceMinor: number;
   costMinor: number;
   taxCategory?: 'zero';
@@ -73,24 +108,28 @@ export interface DemoProduct {
  * never a bare balance (ADR 0009) — see the `opening` loop below.
  */
 export const DEMO_CATALOGUE: readonly DemoProduct[] = [
-  { n: 3, sku: 'SKU-003', name: 'Sugar 1kg', category: 'Groceries', unit: 'ea', priceMinor: 18500, costMinor: 14500, barcodes: ['600100000003'], opening: 40, description: 'Refined cane sugar' },
-  { n: 4, sku: 'SKU-004', name: 'Sunflower oil 1L', category: 'Groceries', unit: 'ea', priceMinor: 32000, costMinor: 26500, barcodes: ['600100000004'], opening: 24 },
-  { n: 5, sku: 'SKU-005', name: 'Pishori rice 2kg', category: 'Groceries', unit: 'ea', priceMinor: 42000, costMinor: 34000, barcodes: ['600100000005'], opening: 18 },
-  { n: 6, sku: 'SKU-006', name: 'Maize flour 2kg', category: 'Groceries', unit: 'ea', priceMinor: 23500, costMinor: 19000, barcodes: ['600100000006'], opening: 30, description: 'Fine grade, unga wa sema' },
-  { n: 7, sku: 'SKU-007', name: 'Tea leaves 250g', category: 'Groceries', unit: 'ea', priceMinor: 27500, costMinor: 22000, barcodes: ['600100000007'], opening: 20 },
-  { n: 8, sku: 'SKU-008', name: 'Soda 300ml', category: 'Beverages', unit: 'ea', priceMinor: 8000, costMinor: 5500, barcodes: ['600100000008', '600100000021'], opening: 48, description: 'Returnable bottle — two tags in circulation' },
-  { n: 9, sku: 'SKU-009', name: 'Drinking water 1L', category: 'Beverages', unit: 'ea', priceMinor: 7000, costMinor: 4500, barcodes: ['600100000009'], opening: 36 },
-  { n: 10, sku: 'SKU-010', name: 'Orange juice 300ml', category: 'Beverages', unit: 'ea', priceMinor: 12000, costMinor: 8500, barcodes: ['600100000010'], opening: 0, description: 'Never received: the till must show "—", not zero' },
-  { n: 11, sku: 'SKU-011', name: 'Tomatoes', category: 'Fresh produce', unit: 'kg', priceMinor: 12000, costMinor: 8000, taxCategory: 'zero', barcodes: [], opening: 15, description: 'Loose, weighed at the till' },
+  { n: 3, sku: 'SKU-003', name: 'Sugar 1kg', category: 'Groceries', unit: 'ea', brand: 'Savannah Foods', priceMinor: 18500, costMinor: 14500, barcodes: ['600100000003'], opening: 40, description: 'Refined cane sugar' },
+  { n: 4, sku: 'SKU-004', name: 'Sunflower oil 1L', category: 'Groceries', unit: 'ea', brand: 'Savannah Foods', priceMinor: 32000, costMinor: 26500, barcodes: ['600100000004'], opening: 24 },
+  { n: 5, sku: 'SKU-005', name: 'Pishori rice 2kg', category: 'Groceries', unit: 'ea', brand: 'Savannah Foods', priceMinor: 42000, costMinor: 34000, barcodes: ['600100000005'], opening: 18 },
+  { n: 6, sku: 'SKU-006', name: 'Maize flour 2kg', category: 'Groceries', unit: 'ea', brand: 'Savannah Foods', priceMinor: 23500, costMinor: 19000, barcodes: ['600100000006'], opening: 30, description: 'Fine grade, unga wa sema' },
+  { n: 7, sku: 'SKU-007', name: 'Tea leaves 250g', category: 'Groceries', unit: 'ea', brand: 'Savannah Foods', priceMinor: 27500, costMinor: 22000, barcodes: ['600100000007'], opening: 20 },
+  // The crate demonstration (item 4.6): bought by the crate, sold by the bottle, ONE ledger.
+  { n: 8, sku: 'SKU-008', name: 'Soda 300ml', category: 'Beverages', unit: 'ea', brand: 'Kaskazi Drinks', conversions: [{ unit: 'crate', factor: 24 }], priceMinor: 8000, costMinor: 5500, barcodes: ['600100000008', '600100000021'], opening: 48, description: 'Returnable bottle — two tags in circulation, 24 to a crate' },
+  // A crate is NOT a global constant: water ships 12 to a crate where soda ships 24, which is why
+  // a conversion hangs off the product instead of off the unit.
+  { n: 9, sku: 'SKU-009', name: 'Drinking water 1L', category: 'Beverages', unit: 'ea', brand: 'Kaskazi Drinks', conversions: [{ unit: 'crate', factor: 12 }], priceMinor: 7000, costMinor: 4500, barcodes: ['600100000009'], opening: 36 },
+  { n: 10, sku: 'SKU-010', name: 'Orange juice 300ml', category: 'Beverages', unit: 'ea', brand: 'Kaskazi Drinks', priceMinor: 12000, costMinor: 8500, barcodes: ['600100000010'], opening: 0, description: 'Never received: the till must show "—", not zero' },
+  // Weighed goods: a fractional conversion into a `weight` base is a fact, into a `count` base it is not.
+  { n: 11, sku: 'SKU-011', name: 'Tomatoes', category: 'Fresh produce', unit: 'kg', conversions: [{ unit: 'g', factor: 0.001 }], priceMinor: 12000, costMinor: 8000, taxCategory: 'zero', barcodes: [], opening: 15, description: 'Loose, weighed at the till' },
   { n: 12, sku: 'SKU-012', name: 'Bananas', category: 'Fresh produce', unit: 'kg', priceMinor: 15000, costMinor: 10000, taxCategory: 'zero', barcodes: [], opening: 12, description: 'Loose, weighed at the till' },
-  { n: 13, sku: 'SKU-013', name: 'Eggs tray (30)', category: 'Fresh produce', unit: 'ea', priceMinor: 48000, costMinor: 41000, barcodes: ['600100000013'], opening: 10 },
-  { n: 14, sku: 'SKU-014', name: 'Detergent 500g', category: 'Household', unit: 'ea', priceMinor: 21000, costMinor: 17000, barcodes: ['600100000014'], opening: 25 },
-  { n: 15, sku: 'SKU-015', name: 'Bar soap 800g', category: 'Household', unit: 'ea', priceMinor: 9500, costMinor: 7000, barcodes: ['600100000015'], opening: 40 },
-  { n: 16, sku: 'SKU-016', name: 'Toilet paper (4 rolls)', category: 'Household', unit: 'ea', priceMinor: 26000, costMinor: 21000, barcodes: ['600100000016'], opening: 22 },
-  { n: 17, sku: 'SKU-017', name: 'Toothpaste 100ml', category: 'Personal care', unit: 'ea', priceMinor: 17500, costMinor: 13500, barcodes: ['600100000017'], opening: 20 },
-  { n: 18, sku: 'SKU-018', name: 'Shampoo 400ml', category: 'Personal care', unit: 'ea', priceMinor: 38000, costMinor: 31000, barcodes: ['600100000018'], opening: 8 },
+  { n: 13, sku: 'SKU-013', name: 'Eggs tray (30)', category: 'Fresh produce', unit: 'ea', conversions: [{ unit: 'tray', factor: 30 }], priceMinor: 48000, costMinor: 41000, barcodes: ['600100000013'], opening: 10 },
+  { n: 14, sku: 'SKU-014', name: 'Detergent 500g', category: 'Household', unit: 'ea', brand: 'Neema Home', priceMinor: 21000, costMinor: 17000, barcodes: ['600100000014'], opening: 25 },
+  { n: 15, sku: 'SKU-015', name: 'Bar soap 800g', category: 'Household', unit: 'ea', brand: 'Neema Home', priceMinor: 9500, costMinor: 7000, barcodes: ['600100000015'], opening: 40 },
+  { n: 16, sku: 'SKU-016', name: 'Toilet paper (4 rolls)', category: 'Household', unit: 'ea', brand: 'Neema Home', priceMinor: 26000, costMinor: 21000, barcodes: ['600100000016'], opening: 22 },
+  { n: 17, sku: 'SKU-017', name: 'Toothpaste 100ml', category: 'Personal care', unit: 'ea', brand: 'Neema Home', priceMinor: 17500, costMinor: 13500, barcodes: ['600100000017'], opening: 20 },
+  { n: 18, sku: 'SKU-018', name: 'Shampoo 400ml', category: 'Personal care', unit: 'ea', brand: 'Neema Home', priceMinor: 38000, costMinor: 31000, barcodes: ['600100000018'], opening: 8 },
   { n: 19, sku: 'SKU-019', name: 'Mobile top-up KES 100', category: null, unit: 'ea', priceMinor: 10000, costMinor: 10000, barcodes: [], stockTracked: false, description: 'Sold as a service: no stock, no category' },
-  { n: 20, sku: 'SKU-020', name: 'Dishwashing liquid 750ml', category: 'Household', unit: 'ea', priceMinor: 24000, costMinor: 19500, barcodes: ['600100000020'], opening: 14, active: false, description: 'Discontinued — must never appear at the till' },
+  { n: 20, sku: 'SKU-020', name: 'Dishwashing liquid 750ml', category: 'Household', unit: 'ea', brand: 'Neema Home', priceMinor: 24000, costMinor: 19500, barcodes: ['600100000020'], opening: 14, active: false, description: 'Discontinued — must never appear at the till' },
 ];
 
 /**
@@ -171,12 +210,33 @@ export async function seedDev(dbs: DbService): Promise<void> {
       return DEMO_CATEGORIES.find((c) => c.name === name)?.id ?? null;
     };
 
+    // Unit catalogue (item 4.6). Idempotent without a conflict target: the uniqueness is on
+    // (tenant, lower(code)), an expression index Kysely cannot name, and "insert if absent" is
+    // exactly what a repeated seed should do either way.
+    for (const u of DEMO_UNITS) {
+      await trx
+        .insertInto('units_of_measure')
+        .values({ tenant_id: SEED.tenantId, code: u.code, name: u.name, kind: u.kind })
+        .onConflict((oc) => oc.doNothing())
+        .execute();
+    }
+
+    for (const b of DEMO_BRANDS) {
+      await trx
+        .insertInto('brands')
+        .values({ id: b.id, tenant_id: SEED.tenantId, name: b.name })
+        .onConflict((oc) => oc.column('id').doNothing())
+        .execute();
+    }
+    const brandIdFor = (name: string | undefined): string | null =>
+      name ? DEMO_BRANDS.find((b) => b.name === name)?.id ?? null : null;
+
     // Products: the two pinned rows, then the demo catalogue.
     await trx
       .insertInto('products')
       .values([
-        { id: SEED.productA, tenant_id: SEED.tenantId, sku: 'SKU-001', name: 'Bread 400g', tax_category_id: SEED.taxCategoryId, price_minor: 6500, cost_minor: 4500, unit: 'ea' },
-        { id: SEED.productB, tenant_id: SEED.tenantId, sku: 'SKU-002', name: 'Milk 500ml', tax_category_id: SEED.taxCategoryId, price_minor: 5800, cost_minor: 4000, unit: 'ea' },
+        { id: SEED.productA, tenant_id: SEED.tenantId, sku: 'SKU-001', name: 'Bread 400g', tax_category_id: SEED.taxCategoryId, brand_id: null, price_minor: 6500, cost_minor: 4500, unit: 'ea' },
+        { id: SEED.productB, tenant_id: SEED.tenantId, sku: 'SKU-002', name: 'Milk 500ml', tax_category_id: SEED.taxCategoryId, brand_id: null, price_minor: 5800, cost_minor: 4000, unit: 'ea' },
         ...DEMO_CATALOGUE.map((p) => ({
           id: demoProductId(p.n),
           tenant_id: SEED.tenantId,
@@ -185,6 +245,7 @@ export async function seedDev(dbs: DbService): Promise<void> {
           description: p.description ?? null,
           category_id: categoryIdFor(p.category),
           tax_category_id: p.taxCategory === 'zero' ? SEED.zeroRatedTaxCategoryId : SEED.taxCategoryId,
+          brand_id: brandIdFor(p.brand),
           unit: p.unit,
           is_stock_tracked: p.stockTracked ?? true,
           is_active: p.active ?? true,
@@ -203,6 +264,19 @@ export async function seedDev(dbs: DbService): Promise<void> {
           .insertInto('barcodes')
           .values({ tenant_id: SEED.tenantId, product_id: demoProductId(p.n), barcode: ean13(body) })
           .onConflict((oc) => oc.columns(['tenant_id', 'barcode']).doNothing())
+          .execute();
+      }
+    }
+
+    // Pack sizes (item 4.6): `1 crate = 24 bottles` is a fact about THIS product — a crate of water
+    // is 12 — so it hangs off the product. Nothing already recorded moves: a conversion only
+    // decides how a quantity written in a pack becomes the base unit stock is held in.
+    for (const p of DEMO_CATALOGUE) {
+      for (const c of p.conversions ?? []) {
+        await trx
+          .insertInto('unit_conversions')
+          .values({ tenant_id: SEED.tenantId, product_id: demoProductId(p.n), unit: c.unit, factor: c.factor })
+          .onConflict((oc) => oc.doNothing())
           .execute();
       }
     }
@@ -335,6 +409,10 @@ if (require.main === module) {
       console.log(`  tenant:  ${SEED.tenantId}`);
       console.log(`  branch:  ${SEED.branchId}`);
       console.log(`  catalogue: ${DEMO_CATALOGUE.length + 2} products in ${DEMO_CATEGORIES.length} categories (see docs/operations/demo-catalogue.md)`);
+      console.log(
+        `  units:    ${DEMO_UNITS.length} units, ${DEMO_BRANDS.length} brands, ` +
+          `${DEMO_CATALOGUE.reduce((n, p) => n + (p.conversions?.length ?? 0), 0)} pack conversions`,
+      );
       await dbs.onModuleDestroy();
     })
     .catch(async (err) => {

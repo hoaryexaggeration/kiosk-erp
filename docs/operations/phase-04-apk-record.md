@@ -5,13 +5,13 @@ Required by §15 "Mandatory Android APK delivery gate". Every field below is par
 | Field | Value |
 |---|---|
 | **Phase** | 4 — Catalogue, pricing/promotions and inventory (+ post-phase polish) |
-| **App version** | `0.4.5` (versionCode 405) |
-| **Artifact** | `artifacts/retail-erp-p04-v0.4.5.apk` |
-| **SHA-256** | `804f15d75709a7c83957b1ff2d4a47c217438430ac5a2d29cc756b48b6b1a0d3` |
+| **App version** | `0.4.6` (versionCode 406) |
+| **Artifact** | `artifacts/retail-erp-p04-v0.4.6.apk` |
+| **SHA-256** | `d75d408280de6bed4a9f44c495323584abfbfc28b096a5fbb5fa064d1b3fa3c6` |
 | **Size** | ~40.2 MB (bundled ML Kit barcode models, unminified debug build) |
 | **Signing** | **Stable internal-test key** (`CN=Kiosk ERP Internal Test`, cert SHA-256 `935c0fbc6993db9ca761b4c3610c71a50d91897fd9b1753d0da3e56dffd056dd`), generated once by `build-apk.sh` and git-ignored (ADR 0005) |
-| **Build** | Docker image `kiosk-erp-android-builder` (JDK 17 + Android SDK 34 + Gradle 8.7); `PHASE=04 VERSION=0.4.5 bash infra/docker/android/build-apk.sh` |
-| **Expected backend** | `apps/api` on `http://<host>:3000/v1`; seed tenant/branch from `seed-dev.ts` (20-product demo catalogue, see `demo-catalogue.md`) |
+| **Build** | Docker image `kiosk-erp-android-builder` (JDK 17 + Android SDK 34 + Gradle 8.7); `PHASE=04 VERSION=0.4.6 bash infra/docker/android/build-apk.sh` |
+| **Expected backend** | `apps/api` on `http://<host>:3000/v1` with migration `0005`; seed tenant/branch from `seed-dev.ts` (20-product demo catalogue with 9 units, 3 brands and 4 pack sizes — see `demo-catalogue.md`) |
 
 **Build history inside Phase 4** (each is signed with the same stable key, so each upgrades in place):
 
@@ -22,6 +22,7 @@ Required by §15 "Mandatory Android APK delivery gate". Every field below is par
 | `0.4.3` | 403 | `cb6bbe8d363fa843` | UI usability pass: `:core:designsystem`, redesigned Home / Till / Stock / Sync / Setup / Catalogue / Licence |
 | `0.4.4` | 404 | `9e45a6a88b151008` | Scan-to-add made reliable (catalogue pulls itself on enrol/sync, paged fetch), scanner-first till, Products row on Home, 20-product demo catalogue |
 | `0.4.5` | 405 | `804f15d75709a7c8` | Opening-stock import (4.5): `POST /v1/inventory/opening-stock/import` + Stock → Opening stock screen (file picker or typed lines) |
+| `0.4.6` | 406 | `d75d408280de6bed` | Units of measure + pack sizes + brands (4.6): conversion at every ledger write, pack picker in the adjust dialog, Manage gains Units & Brands |
 
 > **Upgrade note.** Phase 3's APK was signed with the throwaway Android debug key, so it **cannot be
 > upgraded in place** by this build (signature mismatch) — uninstall the Phase 3 build first. This is
@@ -192,16 +193,80 @@ Opening-stock import (`0.4.5`, item 4.5):
   replayed commit says *already imported*. Documented in
   `docs/operations/opening-stock-import.md`.
 
+Units of measure, pack sizes and brands (`0.4.6`, item 4.6):
+
+- **Migration `0005`**: `units_of_measure` (`code`, `name`, `kind` = count/weight/volume, unique per
+  tenant ignoring case), `unit_conversions` (product-scoped pack sizes: `1 <unit> = <factor>
+  products.unit`, positive and finite, unique per product, validated against the vocabulary at write
+  rather than by a FK), `brands` + `products.brand_id`, and on every movement
+  `entered_unit` / `entered_quantity` — recorded **only when a conversion happened**, with a CHECK
+  keeping the two null together.
+- **One conversion point.** `InventoryService.resolveQuantity` resolves a quantity against the
+  product's base unit before any movement is written, so `applyMovement` — the single write path for
+  receipts, adjustments and opening stock — can only ever store `quantity_delta` in `products.unit`
+  while remembering what the paperwork said. `receiveStock` and `adjustStock` resolve every line
+  *first*, so a receipt naming one unknown pack is refused whole with nothing received; a supervisor
+  override on a negative adjustment is checked against the **base** quantity.
+- **Costs stay per base unit.** A quoted `unitCostMinor` is per the unit on the line and is divided by
+  the factor into cost-per-base before it reaches a FIFO layer or `products.cost_minor` — so
+  `10 crate @ 24000` costs 24,000 a bottle and opens one layer, not ten.
+- **The base-unit rule.** A quantity typed in the product's own unit is held to the same rule as a
+  converted one: `0.5 ea` is refused for a counted product, while a weighed product takes `12.5` kg
+  as it always did. Where a unit's kind is unknown the ledger deliberately invents **no** rule
+  (`unit_kind: null`) — guessing `count` would refuse a legal weigh whose unit nobody had typed.
+- **Conversion contract** (`domain/units.ts`, mirrored in `Units.kt` and `Units.swift`): round half-up
+  to 3 decimals, refuse a non-whole `count` (`FRACTIONAL_QUANTITY`), refuse unusable factors or
+  non-finite quantities, and return a **code** rather than a message. Checked against
+  `fixtures/unit-conversion.json` — **74/74 checks**.
+- **Units and brands are endpoints**: `GET`/`POST /v1/units`, `GET`/`POST /v1/brands`
+  (`catalog.manage` for writes), plus `units` and `brands` on `GET /v1/config/snapshot`. No new
+  server events — this is configuration, read with the product payload.
+- **Product payloads** gain `brand_id`, `brand_name`, `unit_kind` and the `conversions` SET;
+  `PATCH`/`POST` accept `brandId` and `conversions` (replace semantics, exactly like `barcodes`).
+  Changing a product's selling unit re-validates the packs already stored instead of stranding them.
+- **Catalogue import**: the optional `brand` column (aliases `brand_name`, `manufacturer`), matched
+  ignoring case; unknown brands are an error unless `createMissingBrands: true`, reported under
+  `brandsToCreate`.
+- **Opening-stock import**: the optional `unit` column — `SKU-008,10,crate` previews as
+  `10 crate → 240 ea`, costs divide to a per-bottle layer, and `UNKNOWN_CONVERSION` /
+  `FRACTIONAL_QUANTITY` / `UNKNOWN_UNIT` are reported per row. Preview and commit share the planner,
+  so a preview never promises what its own commit refuses.
+- **Tests**: new `units-conversions.spec.ts` (unit/brand CRUD, tenancy 404s, 422 validation, the SET
+  rule and its refusals, a receipt in crates landing as one base-unit layer, weighed fractions,
+  overrides measured in base) plus import and planner cases for the new columns.
+
+Device:
+
+- **Room v4** (`MIGRATION_3_4`, additive): `products.brandId` / `brandName` / `unitKind` and a
+  `product_conversions` table replacing the product's pack set wholesale on each pull — a pack
+  retired on the server must stop converting on a till that has not synced.
+- **Product editor**: a **Pack sizes** section (`1 crate = 24 ea`, add/remove), a brand picker, and a
+  unit picker for the selling unit; saving sends the whole barcode and conversion sets and the brand.
+- **Catalogue → Manage** now manages the shop's reference data: units (code, name, kind — chosen, not
+  typed) and brands alongside categories and tax rates.
+- **Stock → Adjust** offers the product's pack sizes read from Room (so it works offline) and previews
+  the conversion with the *same* `Units.convertQuantity` the server posts with — `10 crate = 240 ea`
+  above `→ 240 ea on hand after this is queued`. An impossible conversion blocks the button with the
+  reason in words rather than queueing a command the server would reject. The queued command carries
+  the quantity **as typed with its unit**; only the device's own on-hand projection uses the base
+  number, because the server is the one that converts for the ledger.
+- **Opening stock** reports the pack beside the base quantity (`10 crate → 240 ea`), and **movement
+  history** shows `10 crate → +240 ea` on movements that were converted. Stock rows label on-hand in
+  the product's own unit.
+- Documented in `docs/operations/units-and-conversions.md`, with the import columns in
+  `catalogue-import-format.md` and `opening-stock-import.md`.
+
 ## Verification
 
-- `npm run verify` (fixtures + API tests): **49/49** domain-fixture checks and **85/85 API tests**
-  across 10 suites — auth, catalog-import, catalog-pricing, inventory, licensing,
-  opening-stock-import, sync-sale, plus the `product-import`, `opening-stock-import` and
-  `domain-fixtures` unit suites — against Docker Postgres.
+- `npm run verify` (fixtures + API tests): **74/74** domain-fixture checks (pricing, money parsing and
+  the unit-conversion vectors) and **127/127 API tests** across 12 suites — auth, catalog-import,
+  catalog-pricing, inventory, licensing, opening-stock-import, sync-sale, units-conversions, plus the
+  `product-import`, `opening-stock-import`, `unit-conversion` and `domain-fixtures` unit suites —
+  against Docker Postgres.
 - `tsc -p tsconfig.build.json --noEmit`: clean.
-- `seed:dev` run twice against a freshly migrated database: **20 products / 18 barcodes / 18 opening
-  movements** both times — the expanded demo catalogue is still idempotent, and the suites above run
-  against it.
+- `seed:dev` run twice against a freshly migrated database: **20 products / 18 barcodes / 9 units /
+  3 brands / 4 pack conversions / 18 opening movements** both times — the demo catalogue is still
+  idempotent, and the suites above run against it.
 - Docker APK build across **14** Gradle modules: clean, **zero Kotlin warnings**. Verified with a full
   `clean assembleDebug` run under `--no-build-cache`, so every module's Kotlin compile actually
   executed — a build-cache hit replays no output and would have hidden any warning.
@@ -214,6 +279,9 @@ Opening-stock import (`0.4.5`, item 4.5):
   adapters remain Phase 5.10.
 - No shift/session screen yet (Phase 6); `cashSessionId` is nullable.
 - Adjustments support a single line per command in the UI (the server accepts multi-line).
+- **Variants and supplier product codes are not built** (deferred rows D4d and D4c): a barcode resolves
+  to exactly one product, and pack conversion is available but **quantity/unit entry on the till** is
+  still Phase 5.3 — today only the stock adjust dialog converts units.
 - **Costing is FIFO with valuation layers** (ADR 0009); full stocktake reconciliation and approvals
   (`approved_by` is populated by the negative-adjustment override flow) land with stocktake (4.8) and
   cash/shift approvals (Phase 6).
@@ -248,6 +316,10 @@ Opening-stock import (`0.4.5`, item 4.5):
 | 19 | Till: **Scan a barcode** sits above the search box on both *Find items* and *Cart*; `6001000000087` and `6001000000216` both add Soda 300ml; an unknown code says what to do next; the deactivated Dishwashing liquid never appears in the list | ☐ |
 | 20 | Stock → **Opening stock**: type `SKU-010,5` → the preview shows *on hand 0 → 5* and a **Ready** pill; **Import 1 line(s)** → the Stock list shows 5 for Orange juice | ☐ |
 | 21 | Stock → **Opening stock**: a line naming `SKU-999` produces a red problem report and the import button stays disabled, and re-opening the screen starts clean | ☐ |
+| 22 | Catalogue → product editor → **Pack sizes**: `Soda 300ml` shows `1 crate = 24 ea`; adding `pallet` is refused with *there is no unit "pallet"* (add `bundle` under Manage first and it is accepted); removing a pack removes it from Stock → Adjust after a sync | ☐ |
+| 23 | Stock → adjust `Soda 300ml`: choose **crate**, type `2` → preview reads `2 crate = 48 ea` and `→ 48 ea on hand after this is queued`; queue it, sync, then the movement history reads `2 crate → +48 ea` | ☐ |
+| 24 | Stock → adjust `Tomatoes` in `g`: `125 g` converts to `0.125 kg` and syncs; a whole-number `crate` count that lands on a fraction (e.g. `1.3 crate`) is blocked with the reason instead of being queued | ☐ |
+| 25 | Catalogue → **Manage**: add unit `bundle` (kind count) and brand `Test Brand`, then create a product picking both from the lists; `GET /v1/config/snapshot` carries them | ☐ |
 
 A failure involving lost transactions, duplicate posting, corrupted local data or a false
 payment/tax status blocks the phase.

@@ -21,6 +21,7 @@ Request body:
 | `records` | A JSON array of objects. Provide this **or** `csv`. |
 | `commit` | `false` (default) is a pure preview: validate and report, write nothing. |
 | `createMissingCategories` | `true` lets the file create categories it references. Never applies to tax rates. |
+| `createMissingBrands` | `true` lets the file create the brands it references. Never applies to tax rates. |
 
 ## Columns
 
@@ -35,6 +36,7 @@ of zero. Required columns are marked ✅.
 | `cost` (`cost_price`, `buying_price`, `purchase_price`) | Latest known purchase cost. Defaults to `0`. |
 | `description` (`notes`) | Free text. |
 | `category` (`category_name`, `department`) | Resolved by name against existing categories. |
+| `brand` (`brand_name`, `manufacturer`) | Resolved by name against existing brands (item 4.6). |
 | `tax` (`tax_rate`, `vat`) | The **name of an existing tax category**, e.g. `VAT 16% (inclusive)`. |
 | `unit` (`uom`, `unit_of_measure`) | Defaults to `ea`. |
 | `barcodes` (`barcode`, `ean`, `upc`) | One or more codes, separated by `\|`, `;` or a space. **Replaces** the product's barcode set. |
@@ -54,6 +56,19 @@ listing the rates that do exist, rather than a new VAT rate being invented from 
 up first (app → Catalogue → Categories & tax, or `POST /v1/tax-categories`).
 
 Categories are different: they are labels, so `createMissingCategories: true` may create them.
+
+### Brands are labels too — but created only when asked
+
+`brand` resolves by name against existing brands, **ignoring case** (`savannah foods` and `Savannah
+Foods` are one brand). An unknown brand is an error (`UNKNOWN_BRAND`) unless the file asks for it:
+`createMissingBrands: true` creates what the file names, and the report lists them under
+`brandsToCreate` so the operator can see which names were invented. Brands are named by the operator,
+not priced by them, so they are safe to create from a file — unlike a tax rate.
+
+As with categories, **the file is the desired state**: a file with no `brand` column, or an empty
+`brand` value, leaves a product with no brand after the update. (Barcodes and pack sizes are the
+exception to this — they are sets, and an omitted *set* column is left alone.)
+
 
 ### Barcodes
 
@@ -76,6 +91,7 @@ A barcode that already belongs to a *different* product is an error, never a sil
   "createCount": 40,
   "updateCount": 78,
   "categoriesToCreate": ["Snacks"],
+  "brandsToCreate": ["Savannah Foods"],
   "errors": [
     { "line": 37, "sku": "SKU-118", "field": "price", "code": "INVALID_PRICE",
       "message": "\"6.5.0\" is not an amount (e.g. 65 or 65.50)" }
@@ -94,15 +110,15 @@ successful preview. `invalid` means "nothing was written".
 Error codes: `EMPTY_FILE`, `MISSING_COLUMN`, `UNKNOWN_COLUMN`, `DUPLICATE_COLUMN`, `TOO_MANY_ROWS`,
 `RAGGED_ROW`, `MISSING_SKU`, `INVALID_SKU`, `MISSING_NAME`, `INVALID_NAME`, `INVALID_DESCRIPTION`,
 `MISSING_PRICE`, `INVALID_PRICE`, `INVALID_COST`, `INVALID_UNIT`, `INVALID_BOOLEAN`, `UNKNOWN_TAX`,
-`UNKNOWN_CATEGORY`, `INVALID_BARCODE`, `TOO_MANY_BARCODES`, `DUPLICATE_SKU_IN_FILE`,
+`UNKNOWN_CATEGORY`, `UNKNOWN_BRAND`, `INVALID_BARCODE`, `TOO_MANY_BARCODES`, `DUPLICATE_SKU_IN_FILE`,
 `DUPLICATE_BARCODE_IN_FILE`, `DUPLICATE_BARCODE`, `AMBIGUOUS_SKU`.
 
 ## Example
 
 ```csv
-sku,name,price,category,tax,unit,cost,barcodes
-SKU-100,Bread 400g,65,Bakery,VAT 16% (inclusive),ea,45,6001000000011
-SKU-101,Milk 500ml,58,Dairy,VAT 16% (inclusive),ea,40,6001000000028|6001000000035
+sku,name,price,category,brand,tax,unit,cost,barcodes
+SKU-100,Bread 400g,65,Bakery,Savannah Foods,VAT 16% (inclusive),ea,45,6001000000011
+SKU-101,Milk 500ml,58,Dairy,,VAT 16% (inclusive),ea,40,6001000000028|6001000000035
 ```
 
 ```bash
@@ -114,5 +130,5 @@ curl -s -X POST http://localhost:3000/v1/products/import \
 # Commit
 curl -s -X POST http://localhost:3000/v1/products/import \
   -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' \
-  -d "$(jq -Rs '{csv: ., commit: true, createMissingCategories: true}' < catalogue.csv)"
+  -d "$(jq -Rs '{csv: ., commit: true, createMissingCategories: true, createMissingBrands: true}' < catalogue.csv)"
 ```
