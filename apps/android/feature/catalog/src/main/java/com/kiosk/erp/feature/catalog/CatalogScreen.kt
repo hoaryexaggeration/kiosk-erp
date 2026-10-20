@@ -18,9 +18,11 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Category
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.CloudOff
@@ -54,6 +56,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -118,7 +121,8 @@ fun CatalogScreen(vm: CatalogViewModel) {
             query = query,
             meta = meta,
             onQuery = vm::setQuery,
-            onNew = vm::openNew,
+            onNew = { vm.openNew() },
+            onCreateWithBarcode = vm::openNew,
             onEdit = vm::openForEdit,
             onToggleActive = vm::setActive,
             onRefresh = vm::refreshFromServer,
@@ -131,6 +135,9 @@ fun CatalogScreen(vm: CatalogViewModel) {
 
 /** Most CSV files arrive as `text/csv`; JSON is accepted too, via the same column vocabulary. */
 private val IMPORT_MIME_TYPES = arrayOf("text/*", "application/json", "application/vnd.ms-excel")
+
+/** What a scanner puts in the search field: digits only, long enough to be a retail tag, short of a sentence. */
+private val SCANNED_CODE = Regex("^[0-9]{6,14}$")
 
 private fun displayName(context: Context, uri: Uri): String = runCatching {
     context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
@@ -147,6 +154,7 @@ private fun CatalogueListScreen(
     meta: CatalogMeta,
     onQuery: (String) -> Unit,
     onNew: () -> Unit,
+    onCreateWithBarcode: (String) -> Unit,
     onEdit: (ProductEntity) -> Unit,
     onToggleActive: (ProductEntity, Boolean) -> Unit,
     onRefresh: () -> Unit,
@@ -244,6 +252,17 @@ private fun CatalogueListScreen(
         Spacer(Modifier.height(StackGap))
 
         when {
+            // A scanner's payload is digits, and it lands here through the same field as typing.
+            // Nothing matched: this is the moment scan-to-add exists for — the tag is not in the
+            // catalogue, so offer to create the product with it, barcode already attached (v0.4.9).
+            products.isEmpty() && SCANNED_CODE.matches(query) -> EmptyState(
+                title = "Nothing here has barcode $query",
+                message = "The tag you scanned is not in the catalogue yet — create the product and this barcode is already attached, with the SKU generated for you.",
+                icon = Icons.Filled.Add,
+                actionLabel = "Create product with this barcode",
+                onAction = { onCreateWithBarcode(query) },
+            )
+
             products.isEmpty() -> EmptyState(
                 title = "No products on this device yet",
                 message = if (meta.online) "Refresh from the server to cache the catalogue, or create the first product."
@@ -362,7 +381,14 @@ private fun ProductEditorScreen(editor: ProductEditorState, meta: CatalogMeta, v
 
         SectionTitle("Identity")
         Spacer(Modifier.height(6.dp))
-        OutlinedTextField(editor.sku, { v -> vm.edit { it.copy(sku = v) } }, label = { Text("SKU") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+        OutlinedTextField(
+            editor.sku,
+            { v -> vm.edit { it.copy(sku = v) } },
+            label = { Text("SKU") },
+            placeholder = { Text(if (editor.isNew) "blank = auto-generate" else "blank = keep current") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
+        )
         Spacer(Modifier.height(8.dp))
         OutlinedTextField(editor.name, { v -> vm.edit { it.copy(name = v) } }, label = { Text("Name") }, singleLine = true, modifier = Modifier.fillMaxWidth())
         Spacer(Modifier.height(8.dp))
@@ -551,6 +577,10 @@ private fun ProductEditorScreen(editor: ProductEditorState, meta: CatalogMeta, v
                 { v -> vm.edit { it.copy(newBarcode = v) } },
                 label = { Text("Add barcode") },
                 singleLine = true,
+                // A scanner is a keyboard that presses Enter when it is done: focus here, pull the
+                // trigger, and the code is added without touching the screen (§5).
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                keyboardActions = KeyboardActions(onDone = { vm.addBarcode() }),
                 modifier = Modifier.weight(1f),
             )
             Button(onClick = vm::addBarcode, enabled = editor.newBarcode.isNotBlank()) { Text("Add") }
@@ -569,7 +599,11 @@ private fun ProductEditorScreen(editor: ProductEditorState, meta: CatalogMeta, v
         }
         if (!editor.canSave && !editor.saving) {
             Spacer(Modifier.height(6.dp))
-            Hint("Enter a SKU, a name and a selling price to save.", tone = Tone.Neutral)
+            Hint(
+                if (editor.isNew) "Enter a name and a selling price to save — leave the SKU blank and one is generated for you."
+                else "Enter a name and a selling price to save — a blank SKU keeps the current one.",
+                tone = Tone.Neutral,
+            )
         }
         Spacer(Modifier.height(24.dp))
     }

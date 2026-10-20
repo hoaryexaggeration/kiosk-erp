@@ -5,12 +5,12 @@ Required by §15 "Mandatory Android APK delivery gate". Every field below is par
 | Field | Value |
 |---|---|
 | **Phase** | 4 — Catalogue, pricing/promotions and inventory (+ post-phase polish) |
-| **App version** | `0.4.8` (versionCode 408) |
-| **Artifact** | `artifacts/retail-erp-p04-v0.4.8.apk` |
-| **SHA-256** | `fc2002a0de9dca377947d8253e4edb484c466eca43320aa3693b7196a546d35b` |
+| **App version** | `0.4.9` (versionCode 409) |
+| **Artifact** | `artifacts/retail-erp-p04-v0.4.9.apk` |
+| **SHA-256** | `c34727167daf71e3c880d2655e0001dba8ef8611e1b40ebf3fb49eb33aca7499` |
 | **Size** | ~42.4 MB (42,394,809 bytes; bundled ML Kit barcode models, unminified debug build) |
 | **Signing** | **Stable internal-test key** (`CN=Kiosk ERP Internal Test`, cert SHA-256 `935c0fbc6993db9ca761b4c3610c71a50d91897fd9b1753d0da3e56dffd056dd`), generated once by `build-apk.sh` and git-ignored (ADR 0005) |
-| **Build** | Docker image `kiosk-erp-android-builder` (JDK 17 + Android SDK 34 + Gradle 8.7); `PHASE=04 VERSION=0.4.8 bash infra/docker/android/build-apk.sh` |
+| **Build** | Docker image `kiosk-erp-android-builder` (JDK 17 + Android SDK 34 + Gradle 8.7); `PHASE=04 VERSION=0.4.9 bash infra/docker/android/build-apk.sh` |
 | **Expected backend** | `apps/api` on `http://<host>:3000/v1` with migration `0006`; seed tenant + **two** branches (Main Kiosk, and West Kiosk — item 4.7's second shelf) and a 20-product demo catalogue with 9 units, 3 brands and 4 pack sizes — see `demo-catalogue.md` |
 
 **Build history inside Phase 4** (each is signed with the same stable key, so each upgrades in place):
@@ -25,6 +25,7 @@ Required by §15 "Mandatory Android APK delivery gate". Every field below is par
 | `0.4.6` | 406 | `d75d408280de6bed` | Units of measure + pack sizes + brands (4.6): conversion at every ledger write, pack picker in the adjust dialog, Manage gains Units & Brands |
 | `0.4.7` | 407 | `31764202b6a0a00e` | Cross-branch transfers (4.7): dispatch/receipt documents, direction pills, send + count screens, in-transit under Stock rows, branch-scoped balances |
 | `0.4.8` | 408 | `fc2002a0de9dca37` | Stocktakes (4.8): count sheet with pack pills and variance in words, counted-not-delta payloads, `Stock count` + who did it in history |
+| `0.4.9` | 409 | `c34727167daf71e3` | Scan-to-add a product (auto SKU) + physical-phone setup guidance |
 
 > **Upgrade note.** Phase 3's APK was signed with the throwaway Android debug key, so it **cannot be
 > upgraded in place** by this build (signature mismatch) — uninstall the Phase 3 build first. This is
@@ -364,17 +365,48 @@ Device:
 - **Movement history** labels these rows *Stock count* and shows `by <name>` — the actor line added
   with the endpoint change.
 
+Scan-to-add a product + physical-phone setup (`0.4.9`, owner request):
+
+- **A blank SKU means "name this one for me".** `POST /v1/products` accepts an absent or empty
+  `sku` and takes the next free `SKU-\d+` for the tenant from what it already holds (the seed tops
+  out at `SKU-020`, so the first scan-created product is `SKU-021`); non-conforming SKUs (`PH4-NEW-1`,
+  `BREAD`) are ignored rather than tripped over, and the zero-padding follows the widest number in
+  use. Generation happens **inside the create transaction**, and a `UNIQUE (tenant, sku)` violation
+  from a concurrent create is retried with the next number instead of surfaced — two tills pressing
+  save at the same instant both end up with a product. An explicit `sku` behaves exactly as before,
+  duplicates included (`DUPLICATE_SKU`, 409).
+- **A cleared SKU on an edit keeps the product's own** — a rename to nothing is not a rename; a
+  padded one is the same SKU with the spaces trimmed. (Previously `sku: ""` on `PATCH` would have
+  written an empty string.)
+- **Catalogue scan-to-add**: scan a tag into the catalogue search — a hit opens the product as
+  before; a miss (digits only, 6–14) now offers **Create product with this barcode**, which opens
+  the editor with that barcode already attached and the SKU field blank. Save shows
+  `<name> saved as <sku>` so the generated number is visible the moment it exists. The SKU field's
+  placeholder says what blank does (`blank = auto-generate` / `blank = keep current`), and validity
+  no longer requires a SKU — name + selling price save.
+- **Scanner-first barcode entry in the editor**: the *Add barcode* field now treats the scanner's
+  trailing Enter (`imeAction = Done`) as **Add** — focus, pull the trigger, done (§5).
+- **Physical-phone setup help.** The default address `http://10.0.2.2:3000/v1` is the **emulator's**
+  alias for the development computer and resolves to nothing on a real handset — the most common
+  reason a brand-new device cannot be set up. Settings now carries a hint under *API address*
+  (emulator vs the computer's LAN address, and to check `<address>/health` in the phone's browser
+  first), and a connection-shaped setup failure says exactly that — `Setup failed: this phone cannot
+  reach <address>. 10.0.2.2 only works inside the emulator…` — instead of `failed to connect to
+  /10.0.2.2:3000`. README gains a *Setting up a physical phone* section; `usesCleartextTraffic` was
+  already enabled, so LAN HTTP is not the blocker.
+
 ## Verification
 
 - `npm run verify` (fixtures + API tests): **74/74** domain-fixture checks (pricing, money parsing and
-  the unit-conversion vectors) and **156/156 API tests** across 14 suites — auth, catalog-import,
-  catalog-pricing, inventory, licensing, opening-stock-import, sync-sale, units-conversions,
-  **transfers (18: both halves end to end, the conservation and cost claims, every refusal, branch
-  scoping, numbering, idempotent replay)**, **stocktake (11: reason + actor movements, silent
-  agreement, FIFO loss on a zero count, pack vs base variances, refused non-numbers, unknown lines,
-  replay, `FORBIDDEN`, uncosted review with a durable conflict case)**, plus the `product-import`,
-  `opening-stock-import`, `unit-conversion` and `domain-fixtures` unit suites — against Docker
-  Postgres.
+  the unit-conversion vectors) and **159/159 API tests** across 14 suites — auth, catalog-import,
+  catalog-pricing **(11: catalogue exports, optimistic-concurrency create/update, barcodes, tax
+  category, auto-SKU generation ×3, explicit duplicate refused, blank edit keeps the SKU, promotions)**,
+  inventory, licensing, opening-stock-import, sync-sale, units-conversions, **transfers (18: both
+  halves end to end, the conservation and cost claims, every refusal, branch scoping, numbering,
+  idempotent replay)**, **stocktake (11: reason + actor movements, silent agreement, FIFO loss on a
+  zero count, pack vs base variances, refused non-numbers, unknown lines, replay, `FORBIDDEN`,
+  uncosted review with a durable conflict case)**, plus the `product-import`, `opening-stock-import`,
+  `unit-conversion` and `domain-fixtures` unit suites — against Docker Postgres.
 - `tsc -p tsconfig.build.json --noEmit`: clean.
 - `seed:dev` run twice against a freshly migrated database: **20 products / 18 barcodes / 9 units /
   3 brands / 4 pack conversions / 18 opening movements / 2 branches** both times — the demo catalogue
@@ -447,6 +479,9 @@ Device:
 | 33 | Scan `6001000000087` (Soda) → its line appears with book `0 ea`; type `0` → *Agrees with the book — writes nothing*; type `1` → *1 ea found*; tap the **crate** pill → `1 crate = 24 ea` and the words become `24 ea found`; type `-3` into a line → *a count cannot be below zero* in place, the field goes red, and the queue button counts only the valid lines | ☐ |
 | 34 | Fill two sheet lines with their shown **book** (both read *Agrees with the book — writes nothing*), set a third line to `0` (*N <unit> short of the book*), add note `Sunday night count` → **Queue count (n line(s), 1 differ)** → the card says **Queued — pending on this device**; airplane mode before queueing to prove it needs no network | ☐ |
 | 35 | **Sync now** → the count lands: the zeroed product's on-hand is 0, its movement history shows a **Stock count** row with the negative quantity and **by Owner**, the book-agreeing products have NO new movement at all, and `GET /v1/inventory/movements?productId=…` returns `actor_id`/`actor_name` for every row | ☐ |
+| 36 | Physical phone: Settings → API address shows the emulator hint; leave `10.0.2.2` and **Set up** → the failure now reads *this phone cannot reach … 10.0.2.2 only works inside the emulator…*; set the computer's LAN address (`http://<LAN ip>:3000/v1`), open `<address>/health` in the phone's browser first (JSON), then **Set up** succeeds and pulls the catalogue | ☐ |
+| 37 | Catalogue: scan a barcode **not in the catalogue** (e.g. `6099999999991`) → *Nothing here has barcode …* with **Create product with this barcode** → the editor opens with the barcode already listed and SKU blank (`blank = auto-generate`) → enter name + price → **Save** → toast `… saved as SKU-021`, and the new product appears in the list with its barcode | ☐ |
+| 38 | Catalogue: scan a barcode that **is** in the catalogue → its product opens as before; in an existing product's editor, type a code into *Add barcode* and press the scanner's Enter → the barcode is added without touching **Add**; clear an existing product's SKU and save → the SKU is **unchanged** (blank keeps it), while a fresh product's save message shows the generated number | ☐ |
 
 A failure involving lost transactions, duplicate posting, corrupted local data or a false
 payment/tax status blocks the phase.

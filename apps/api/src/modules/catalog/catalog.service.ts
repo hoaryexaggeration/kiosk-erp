@@ -9,6 +9,10 @@ import { parseCsv } from '../../domain/csv';
 import { UNIT_KINDS, UnitKind } from '../../domain/units';
 import { ImportReferenceData, planProductImport, recordsToCsvRows } from './product-import';
 
+/** PostgreSQL's unique_violation — the one error worth retrying an auto-generated SKU for. */
+const isUniqueViolation = (err: unknown): boolean =>
+  typeof err === 'object' && err !== null && String((err as { code?: unknown }).code) === '23505';
+
 /**
  * One pack size of a product: `1 <unit> = <factor> <product's base unit>` (item 4.6). Devices
  * cache these so a crate converts offline, and the stock ledger only ever sees the base unit.
@@ -20,7 +24,8 @@ export interface ProductConversion {
 
 export interface CreateProductInput {
   id?: string;
-  sku: string;
+  /** Blank or absent → the server takes the next free `SKU-\d+` (scan-to-add, v0.4.9). */
+  sku?: string;
   name: string;
   description?: string;
   categoryId?: string;
@@ -216,43 +221,84 @@ export class CatalogService {
 
   async createProduct(tenantId: string, actorId: string, correlationId: string, input: CreateProductInput) {
     const id = input.id ?? newId();
-    return this.dbs.transaction(async (trx) => {
-      const dup = await trx.selectFrom('products').select('id').where('tenant_id', '=', tenantId).where('sku', '=', input.sku).executeTakeFirst();
-      if (dup) throw AppError.conflict('DUPLICATE_SKU', `SKU ${input.sku} already exists`);
+    // A blank SKU means "name this one for me" (scan-to-add, v0.4.9): the number is generated INSIDE
+    // the transaction from what this tenant already holds, and a UNIQUE (tenant, sku) violation from
+    // a concurrent create — two tills saving the same instant — is retried with the next number
+    // rather than surfaced: both tills end up with a product, neither with a confusing error.
+    const requestedSku = input.sku?.trim() ?? '';
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        return await this.dbs.transaction(async (trx) => {
+          const sku = requestedSku || (await this.nextSku(trx, tenantId));
+          const dup = await trx.selectFrom('products').select('id').where('tenant_id', '=', tenantId).where('sku', '=', sku).executeTakeFirst();
+          if (dup) throw AppError.conflict('DUPLICATE_SKU', `SKU ${sku} already exists`);
 
-      if (input.categoryId) await this.assertTenanted(trx, tenantId, 'categories', input.categoryId, 'UNKNOWN_CATEGORY');
-      if (input.taxCategoryId) await this.assertTenanted(trx, tenantId, 'tax_categories', input.taxCategoryId, 'UNKNOWN_TAX_CATEGORY');
-      if (input.brandId) await this.assertTenanted(trx, tenantId, 'brands', input.brandId, 'UNKNOWN_BRAND');
+          if (input.categoryId) await this.assertTenanted(trx, tenantId, 'categories', input.categoryId, 'UNKNOWN_CATEGORY');
+          if (input.taxCategoryId) await this.assertTenanted(trx, tenantId, 'tax_categories', input.taxCategoryId, 'UNKNOWN_TAX_CATEGORY');
+          if (input.brandId) await this.assertTenanted(trx, tenantId, 'brands', input.brandId, 'UNKNOWN_BRAND');
 
-      const unit = input.unit ?? 'ea';
-      // Validated before anything is written: a product with a pack size it could never convert is
-      // a product whose next receipt would land in the wrong unit (item 4.6).
-      const conversions = await this.validateConversions(trx, tenantId, unit, input.conversions ?? []);
+          const unit = input.unit ?? 'ea';
+          // Validated before anything is written: a product with a pack size it could never convert is
+          // a product whose next receipt would land in the wrong unit (item 4.6).
+          const conversions = await this.validateConversions(trx, tenantId, unit, input.conversions ?? []);
 
-      await trx
-        .insertInto('products')
-        .values({
-          id,
-          tenant_id: tenantId,
-          sku: input.sku,
-          name: input.name,
-          description: input.description ?? null,
-          category_id: input.categoryId ?? null,
-          tax_category_id: input.taxCategoryId ?? null,
-          brand_id: input.brandId ?? null,
-          unit,
-          is_stock_tracked: input.isStockTracked ?? true,
-          price_minor: input.priceMinor ?? 0,
-          cost_minor: input.costMinor ?? 0,
-        })
-        .execute();
+          await trx
+            .insertInto('products')
+            .values({
+              id,
+              tenant_id: tenantId,
+              sku,
+              name: input.name,
+              description: input.description ?? null,
+              category_id: input.categoryId ?? null,
+              tax_category_id: input.taxCategoryId ?? null,
+              brand_id: input.brandId ?? null,
+              unit,
+              is_stock_tracked: input.isStockTracked ?? true,
+              price_minor: input.priceMinor ?? 0,
+              cost_minor: input.costMinor ?? 0,
+            })
+            .execute();
 
-      await this.replaceBarcodes(trx, tenantId, id, input.barcodes ?? []);
-      // Absent means "no conversions wanted", which is exactly an empty set on a new product.
-      if (input.conversions !== undefined) await this.writeConversions(trx, tenantId, id, conversions);
+          await this.replaceBarcodes(trx, tenantId, id, input.barcodes ?? []);
+          // Absent means "no conversions wanted", which is exactly an empty set on a new product.
+          if (input.conversions !== undefined) await this.writeConversions(trx, tenantId, id, conversions);
 
-      return this.recordProductChange(trx, tenantId, actorId, correlationId, 'product.created', id);
-    });
+          return this.recordProductChange(trx, tenantId, actorId, correlationId, 'product.created', id);
+        });
+      } catch (err) {
+        // Only the generated path can be helped by trying again, and only a few times: a repeated
+        // violation means something else owns the number pattern, not that we guessed badly.
+        if (requestedSku || attempt >= 2 || !isUniqueViolation(err)) throw err;
+      }
+    }
+  }
+
+  /**
+   * The next free `SKU-<zero-padded number>` for this tenant: existing SKUs are the only input, so a
+   * shop that has never used the pattern starts at `SKU-001` and one that already sells under
+   * `SKU-0420` continues from there. Non-conforming SKUs (`PH4-NEW-1`, `BREAD`) are ignored rather
+   * than tripped over — they are not part of the sequence (scan-to-add, v0.4.9).
+   */
+  private async nextSku(trx: Kysely<Database>, tenantId: string): Promise<string> {
+    const rows = await trx
+      .selectFrom('products')
+      .select('sku')
+      .where('tenant_id', '=', tenantId)
+      .where('sku', 'like', 'SKU-%')
+      .execute();
+    let max = 0;
+    let width = 3;
+    for (const row of rows) {
+      const match = /^SKU-(\d+)$/.exec(row.sku);
+      if (!match) continue;
+      const value = Number(match[1]);
+      if (value > max) {
+        max = value;
+        width = match[1].length;
+      }
+    }
+    return `SKU-${String(max + 1).padStart(width, '0')}`;
   }
 
   /**
@@ -396,9 +442,12 @@ export class CatalogService {
       if (input.expectedVersion !== undefined && current.version !== input.expectedVersion) {
         throw AppError.conflict('VERSION_MISMATCH', `Expected version ${input.expectedVersion} but found ${current.version}`);
       }
-      if (input.sku && input.sku !== current.sku) {
-        const dup = await trx.selectFrom('products').select('id').where('tenant_id', '=', tenantId).where('sku', '=', input.sku).executeTakeFirst();
-        if (dup) throw AppError.conflict('DUPLICATE_SKU', `SKU ${input.sku} already exists`);
+      // A cleared or blank SKU keeps the product's own: an edit that empties the field is not a
+      // rename to nothing, and a padded one is the same SKU with the spaces trimmed off.
+      const requestedSku = input.sku?.trim();
+      if (requestedSku && requestedSku !== current.sku) {
+        const dup = await trx.selectFrom('products').select('id').where('tenant_id', '=', tenantId).where('sku', '=', requestedSku).executeTakeFirst();
+        if (dup) throw AppError.conflict('DUPLICATE_SKU', `SKU ${requestedSku} already exists`);
       }
 
       const nextUnit = input.unit ?? current.unit;
@@ -418,7 +467,7 @@ export class CatalogService {
       await trx
         .updateTable('products')
         .set({
-          sku: input.sku ?? current.sku,
+          sku: requestedSku || current.sku,
           name: input.name ?? current.name,
           description: input.description === undefined ? current.description : input.description,
           category_id: input.categoryId === undefined ? current.category_id : input.categoryId,

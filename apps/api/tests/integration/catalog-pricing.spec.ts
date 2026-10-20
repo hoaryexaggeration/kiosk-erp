@@ -71,6 +71,45 @@ describe('catalogue + price resolution (Phase 4)', () => {
     expect(stale.body.code).toBe('VERSION_MISMATCH');
   });
 
+  // Scan-to-add (v0.4.9): a barcode scanned on the shop floor creates the product without anyone
+  // inventing a SKU first — so the server names it. The seed tops out at SKU-020.
+  it('generates the next SKU when the caller leaves it blank (scan-to-add)', async () => {
+    const first = await auth(request(app.getHttpServer()).post('/v1/products')).send({
+      name: 'Scanned oats 500g',
+      priceMinor: 12000,
+      barcodes: ['6012345678901'],
+    });
+    expect(first.status).toBe(201);
+    expect(first.body.sku).toBe('SKU-021');
+
+    const second = await auth(request(app.getHttpServer()).post('/v1/products')).send({ name: 'Scanned jam 400g', priceMinor: 15500 });
+    expect(second.status).toBe(201);
+    expect(second.body.sku).toBe('SKU-022'); // the next call KNOWS the last one was taken
+
+    // Whitespace is blank too: a half-typed field must not become a SKU made of spaces.
+    const third = await auth(request(app.getHttpServer()).post('/v1/products')).send({ name: 'Scanned salt', sku: '   ', priceMinor: 900 });
+    expect(third.status).toBe(201);
+    expect(third.body.sku).toBe('SKU-023');
+  });
+
+  it('still refuses a SKU somebody asked for by name when it already exists', async () => {
+    const res = await auth(request(app.getHttpServer()).post('/v1/products')).send({ sku: 'SKU-001', name: 'Impostor bread', priceMinor: 1000 });
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('DUPLICATE_SKU');
+  });
+
+  it('keeps the current SKU when an edit clears the field — a rename to nothing is not a rename', async () => {
+    const created = await auth(request(app.getHttpServer()).post('/v1/products')).send({ sku: 'SKU-0777', name: 'Lemons per kg', priceMinor: 500 });
+    expect(created.status).toBe(201);
+    const updated = await auth(request(app.getHttpServer()).patch(`/v1/products/${created.body.id as string}`)).send({
+      sku: '  ',
+      name: 'Lemons (rack)',
+      expectedVersion: created.body.version,
+    });
+    expect(updated.status).toBe(200);
+    expect(updated.body.sku).toBe('SKU-0777');
+  });
+
   it('adds, replaces and removes barcodes on an existing product (item 4.1)', async () => {
     const created = await auth(request(app.getHttpServer()).post('/v1/products')).send({
       sku: 'PH4-BC-1',

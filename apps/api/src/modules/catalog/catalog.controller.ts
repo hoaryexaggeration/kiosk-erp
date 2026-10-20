@@ -18,7 +18,12 @@ const ConversionSetSchema = z
 
 const CreateProductSchema = z.object({
   id: z.string().uuid().optional(),
-  sku: z.string().min(1).max(64),
+  /**
+   * Blank or absent means "name this one for me" (scan-to-add, v0.4.9): a tag scanned on the shop
+   * floor creates the product without anyone inventing a SKU first, so the server takes the next
+   * free `SKU-\d+` itself. Named SKUs behave exactly as before, duplicates included.
+   */
+  sku: z.string().max(64).optional(),
   name: z.string().min(1).max(200),
   description: z.string().max(2000).optional(),
   categoryId: z.string().uuid().optional(),
@@ -34,7 +39,8 @@ const CreateProductSchema = z.object({
 });
 
 const UpdateProductSchema = z.object({
-  sku: z.string().min(1).max(64).optional(),
+  /** Blank keeps the SKU the product already has — a cleared field is not a rename to nothing. */
+  sku: z.string().max(64).optional(),
   name: z.string().min(1).max(200).optional(),
   description: z.string().max(2000).nullable().optional(),
   categoryId: z.string().uuid().nullable().optional(),

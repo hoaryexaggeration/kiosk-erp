@@ -100,9 +100,25 @@ class SettingsViewModel(
                 _state.update { it.copy(message = "Device enrolled — pulling the catalogue and stock…", configured = true, busy = true) }
                 firstSync()
             }.onFailure { err ->
-                _state.update { it.copy(message = "Setup failed: ${err.message}", busy = false) }
+                _state.update { it.copy(message = setupFailure(s.apiBaseUrl.trim(), err), busy = false) }
             }
         }
+    }
+
+    /**
+     * Why setup stopped, in the words that actually fix it. The single most common failure has a
+     * name: the default `10.0.2.2` is the EMULATOR's alias for the development computer and resolves
+     * to nothing on a physical phone, so an address-shaped failure says exactly that instead of
+     * surfacing as "failed to connect to /10.0.2.2:3000".
+     */
+    private fun setupFailure(base: String, err: Throwable): String {
+        val detail = err.message ?: err.javaClass.simpleName
+        val unreachable = listOf("unable to resolve host", "failed to connect", "connection refused", "network is unreachable", "timeout", "cleartext", "unknownhost")
+            .any { detail.contains(it, ignoreCase = true) }
+        if (!unreachable) return "Setup failed: $detail"
+        return "Setup failed: this phone cannot reach $base. 10.0.2.2 only works inside the emulator — " +
+            "on a physical phone use your computer's LAN address (same Wi-Fi), e.g. http://192.168.1.50:3000/v1, " +
+            "with the API running. ($detail)"
     }
 
     /**

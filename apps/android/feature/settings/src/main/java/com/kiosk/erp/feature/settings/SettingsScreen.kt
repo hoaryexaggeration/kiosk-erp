@@ -108,6 +108,13 @@ fun SettingsScreen(
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
                 modifier = Modifier.fillMaxWidth(),
             )
+            Spacer(Modifier.height(4.dp))
+            Hint(
+                "The emulator reaches your computer as 10.0.2.2. A physical phone needs your computer's " +
+                    "own LAN address on the same Wi-Fi — e.g. http://192.168.1.50:3000/v1. Check it first: " +
+                    "that address + /health must open in this phone's browser.",
+                tone = Tone.Neutral,
+            )
         }
 
         item { SectionTitle("Sign in", caption = "The owner or manager account that enrols the till.") }

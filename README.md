@@ -75,6 +75,19 @@ npm run verify
 npm run android:build      # writes artifacts/retail-erp-pXX-*.apk
 ```
 
+### Setting up a physical phone (not the emulator)
+
+The app's default API address `http://10.0.2.2:3000/v1` is the **emulator's** alias for this
+computer — it resolves to nothing on a real handset, and setup fails with "cannot reach". On a
+phone on the same network:
+
+1. Find this computer's own address: `ip -4 addr show` (e.g. `172.21.219.155`).
+2. In the phone's browser, open `http://<that address>:3000/v1/health` — it must return JSON
+   (`{"status":"ok",…}`). If it does not, the API (`npm run api:dev`) is not running or the phone
+   is on a different network.
+3. In the app: **Settings → API address** → `http://<that address>:3000/v1` (keep the `/v1`),
+   then **Set up** with `owner@kiosk.test` / `demo1234`.
+
 ## Documentation index
 
 - `docs/product/phase-0-discovery.md` — workflow map, MVP boundaries, permission matrix, offline capability matrix

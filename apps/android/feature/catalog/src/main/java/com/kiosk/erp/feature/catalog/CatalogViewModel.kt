@@ -60,7 +60,11 @@ data class ProductEditorState(
     /** Live, exact validity so the save button can be disabled rather than failing on submit. */
     val priceMinor: Long? get() = Pricing.parseMinorInput(priceText)
     val costMinor: Long? get() = if (costText.isBlank()) 0L else Pricing.parseMinorInput(costText)
-    val canSave: Boolean get() = !saving && sku.isNotBlank() && name.isNotBlank() && priceMinor != null && costMinor != null
+    /**
+     * The SKU is deliberately NOT part of validity: blank means "the server names it" on a new
+     * product and "keep the current one" on an edit (scan-to-add, v0.4.9).
+     */
+    val canSave: Boolean get() = !saving && name.isNotBlank() && priceMinor != null && costMinor != null
     /** What a pack row reads: `1 crate = 24 ea`. */
     fun conversionLabel(conversion: ServerConversion): String = "1 ${conversion.unit} = ${Units.formatQuantity(conversion.factor)} $unit"
 }
@@ -194,8 +198,14 @@ class CatalogViewModel(
 
     // --- editor ----------------------------------------------------------------------------------
 
-    fun openNew() {
-        _editor.value = ProductEditorState(taxCategoryId = _meta.value.taxCategories.firstOrNull()?.id)
+    fun openNew(barcode: String? = null) {
+        _editor.value = ProductEditorState(
+            taxCategoryId = _meta.value.taxCategories.firstOrNull()?.id,
+            // A tag just scanned is already this product's first barcode, and the SKU below is left
+            // blank for the server to generate — that is what makes scan-to-add (v0.4.9) two fields
+            // and a save: name it, price it, done.
+            barcodes = barcode?.let { listOf(it) } ?: emptyList(),
+        )
     }
 
     /**
@@ -305,7 +315,7 @@ class CatalogViewModel(
         val priceMinor = editor.priceMinor
         val costMinor = editor.costMinor
         if (!editor.canSave || priceMinor == null || costMinor == null) {
-            _editor.value = editor.copy(error = "Check the SKU, name and price (two decimals at most)")
+            _editor.value = editor.copy(error = "Check the name and a selling price (two decimals at most)")
             return
         }
         viewModelScope.launch {
@@ -336,7 +346,9 @@ class CatalogViewModel(
                 .onSuccess { saved ->
                     productRepository.cacheProduct(saved)
                     _editor.value = null
-                    _meta.value = _meta.value.copy(message = "${saved.name} saved", online = true)
+                    // The name includes the SKU so a blank field's auto-generation is visible the
+                    // moment it happens — nobody has to guess what the server called it.
+                    _meta.value = _meta.value.copy(message = "${saved.name} saved as ${saved.sku}", online = true)
                 }
                 .onFailure { failure ->
                     _editor.value = editor.copy(saving = false, error = describe(failure))
