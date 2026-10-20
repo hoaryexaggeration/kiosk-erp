@@ -7,7 +7,7 @@ import { EventsService } from '../platform/events.service';
 import { AuthService } from '../auth/auth.service';
 import { SaleService } from '../sales/sale.service';
 import { InventoryService } from '../inventory/inventory.service';
-import { StockAdjustmentSchema, StockReceiptSchema, StockTransferSchema } from '../inventory/inventory.schema';
+import { StockAdjustmentSchema, StockReceiptSchema, StockTransferSchema, StocktakeSchema } from '../inventory/inventory.schema';
 import { CommandEnvelope, SalePayloadSchema } from './command.schema';
 import { AuthContext } from '../../common/auth-context';
 
@@ -27,6 +27,8 @@ const REQUIRED_PERMISSION: Record<string, string> = {
   Sale: 'pos.sale.create',
   StockReceipt: 'inventory.receive',
   StockAdjustment: 'inventory.adjust',
+  // A count produces adjustment movements, so it is held to the permission that writes them (4.8).
+  Stocktake: 'inventory.adjust',
   // A transfer moves stock a branch owns: both halves — the dispatch and the receipt — need it.
   StockTransfer: 'inventory.transfer',
 };
@@ -193,6 +195,18 @@ export class SyncService {
         return { status: 'rejected', code: 'VALIDATION_ERROR', message: parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ') };
       }
       const applied = await this.inventoryService.adjustStock(trx, commandCtx, parsed.data);
+      return { status: applied.status, result: applied.result, code: applied.code, message: applied.message, conflictCodes: applied.conflictCodes };
+    }
+
+    // A count (item 4.8): the device sends the quantities it READ, and the variance against this
+    // branch's book is derived here — a projection the device may hold must never decide what the
+    // ledger becomes.
+    if (command.aggregateType === 'Stocktake') {
+      const parsed = StocktakeSchema.safeParse(command.payload);
+      if (!parsed.success) {
+        return { status: 'rejected', code: 'VALIDATION_ERROR', message: parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ') };
+      }
+      const applied = await this.inventoryService.stocktake(trx, commandCtx, parsed.data);
       return { status: applied.status, result: applied.result, code: applied.code, message: applied.message, conflictCodes: applied.conflictCodes };
     }
 

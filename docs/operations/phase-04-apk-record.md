@@ -5,12 +5,12 @@ Required by §15 "Mandatory Android APK delivery gate". Every field below is par
 | Field | Value |
 |---|---|
 | **Phase** | 4 — Catalogue, pricing/promotions and inventory (+ post-phase polish) |
-| **App version** | `0.4.7` (versionCode 407) |
-| **Artifact** | `artifacts/retail-erp-p04-v0.4.7.apk` |
-| **SHA-256** | `31764202b6a0a00ed72f9f13230a3f58cbf21045a90b64fca7e927f56b184291` |
-| **Size** | ~42.4 MB (42,362,041 bytes; bundled ML Kit barcode models, unminified debug build) |
+| **App version** | `0.4.8` (versionCode 408) |
+| **Artifact** | `artifacts/retail-erp-p04-v0.4.8.apk` |
+| **SHA-256** | `fc2002a0de9dca377947d8253e4edb484c466eca43320aa3693b7196a546d35b` |
+| **Size** | ~42.4 MB (42,394,809 bytes; bundled ML Kit barcode models, unminified debug build) |
 | **Signing** | **Stable internal-test key** (`CN=Kiosk ERP Internal Test`, cert SHA-256 `935c0fbc6993db9ca761b4c3610c71a50d91897fd9b1753d0da3e56dffd056dd`), generated once by `build-apk.sh` and git-ignored (ADR 0005) |
-| **Build** | Docker image `kiosk-erp-android-builder` (JDK 17 + Android SDK 34 + Gradle 8.7); `PHASE=04 VERSION=0.4.7 bash infra/docker/android/build-apk.sh` |
+| **Build** | Docker image `kiosk-erp-android-builder` (JDK 17 + Android SDK 34 + Gradle 8.7); `PHASE=04 VERSION=0.4.8 bash infra/docker/android/build-apk.sh` |
 | **Expected backend** | `apps/api` on `http://<host>:3000/v1` with migration `0006`; seed tenant + **two** branches (Main Kiosk, and West Kiosk — item 4.7's second shelf) and a 20-product demo catalogue with 9 units, 3 brands and 4 pack sizes — see `demo-catalogue.md` |
 
 **Build history inside Phase 4** (each is signed with the same stable key, so each upgrades in place):
@@ -24,6 +24,7 @@ Required by §15 "Mandatory Android APK delivery gate". Every field below is par
 | `0.4.5` | 405 | `804f15d75709a7c8` | Opening-stock import (4.5): `POST /v1/inventory/opening-stock/import` + Stock → Opening stock screen (file picker or typed lines) |
 | `0.4.6` | 406 | `d75d408280de6bed` | Units of measure + pack sizes + brands (4.6): conversion at every ledger write, pack picker in the adjust dialog, Manage gains Units & Brands |
 | `0.4.7` | 407 | `31764202b6a0a00e` | Cross-branch transfers (4.7): dispatch/receipt documents, direction pills, send + count screens, in-transit under Stock rows, branch-scoped balances |
+| `0.4.8` | 408 | `fc2002a0de9dca37` | Stocktakes (4.8): count sheet with pack pills and variance in words, counted-not-delta payloads, `Stock count` + who did it in history |
 
 > **Upgrade note.** Phase 3's APK was signed with the throwaway Android debug key, so it **cannot be
 > upgraded in place** by this build (signature mismatch) — uninstall the Phase 3 build first. This is
@@ -319,14 +320,61 @@ Device:
   two shelves never sees one branch's stock replace another's in the projection.
 - Documented in `docs/operations/stock-transfers.md`.
 
+Stocktakes / cycle counts (`0.4.8`, item 4.8):
+
+- **No new table** — a count is movement machinery pointed at the one number nobody else can answer.
+  `StocktakeSchema` carries **counted** quantities (`quantity >= 0`, never a delta): "the shelf holds
+  20" is a fact about the shelf, so the variance is derived per line against the **server's** book —
+  a device whose cached projection has drifted would otherwise post a number nobody read.
+- **Agreement writes nothing.** A line matching the book reports `matchedLines` and leaves no
+  movement (float dust counts as agreement, so a scale cannot fill history with `4e-15 kg` rows);
+  a differing line becomes one movement through `applyMovement` with `reason: 'stocktake'`,
+  `source_type: 'stocktake'`, `source_id` = the count's id and the caller's `actor_id` — §15's "a
+  count produces adjustment movements with reason and actor".
+- **The pack survives only when it divides.** A variance that is a whole number of packs is written
+  in the counted unit (`entered_unit`/`entered_quantity`), any other variance in base units: a
+  fraction of a crate is not something a shelf can hold. Short variances consume FIFO layers and book
+  `cogs_minor` (shrinkage costs shillings too); found stock opens a layer at `products.cost_minor`
+  rather than zero; an uncosted shortage is `review_required` + conflict `UNCOSTED_STOCK` with
+  `cogs_minor` left `NULL` — *never costed* is a different claim from *costed at nothing*.
+- **No override by arithmetic.** `quantity >= 0` means a count can never push stock below zero, so
+  unlike an adjustment it asks for no supervisor note; the refusals are about a count that was never
+  a number — `VALIDATION_ERROR` (negative), `FRACTIONAL_QUANTITY` (`20.5 ea`), `EMPTY_STOCKTAKE`
+  (nothing named exists here; unknown lines are dropped so a stale cache cannot block a real count).
+  All lines resolve before anything is written, and replaying a `commandId` returns `duplicate`.
+- **Permission and branch**: `Stocktake` maps to `inventory.adjust` (a count *produces* adjustments)
+  and is constrained to the enrolled branch by `sync.pushOne` (`BRANCH_MISMATCH`); audit row
+  `stock.counted` (tallies + note), server event, outbox event. `GET /v1/inventory/movements` now
+  returns `actor_id` / `actor_name` for **every** movement — history can name the person.
+
+Device:
+
+- **Stock → Stocktake** count sheet: *Scan or type a barcode or SKU* adds a line (scanner's Enter
+  resolves against Room), *Count everything with stock (n)* prefills the full-stocktake case (zero
+  book excluded — found stock is counted by scanning the product specifically), each card carries
+  the product, its **book**, unit pills for products with packs, and the count field with the
+  variance **in words**: `Agrees with the book — writes nothing`, `26 ea short of the book`,
+  `5 ea found`, plus the same `2 crate = 48 ea` conversion preview the server posts with. Blank lines
+  say *not counted yet — left out of the count*; negative or unparseable entries are refused in
+  place, and the button counts what it will send (`Queue count (7 line(s), 3 differ)`).
+- **One `Stocktake` outbox command per sheet** (id device-chosen, works with no connection); the
+  local projection is nudged by the variance the device sees so the screen never contradicts the
+  sheet, and the next pull replaces it with the server's figure. Per-sheet pack lookups are read
+  from Room (`sheetPacks`) so the pills work offline.
+- **Movement history** labels these rows *Stock count* and shows `by <name>` — the actor line added
+  with the endpoint change.
+
 ## Verification
 
 - `npm run verify` (fixtures + API tests): **74/74** domain-fixture checks (pricing, money parsing and
-  the unit-conversion vectors) and **145/145 API tests** across 13 suites — auth, catalog-import,
+  the unit-conversion vectors) and **156/156 API tests** across 14 suites — auth, catalog-import,
   catalog-pricing, inventory, licensing, opening-stock-import, sync-sale, units-conversions,
   **transfers (18: both halves end to end, the conservation and cost claims, every refusal, branch
-  scoping, numbering, idempotent replay)**, plus the `product-import`, `opening-stock-import`,
-  `unit-conversion` and `domain-fixtures` unit suites — against Docker Postgres.
+  scoping, numbering, idempotent replay)**, **stocktake (11: reason + actor movements, silent
+  agreement, FIFO loss on a zero count, pack vs base variances, refused non-numbers, unknown lines,
+  replay, `FORBIDDEN`, uncosted review with a durable conflict case)**, plus the `product-import`,
+  `opening-stock-import`, `unit-conversion` and `domain-fixtures` unit suites — against Docker
+  Postgres.
 - `tsc -p tsconfig.build.json --noEmit`: clean.
 - `seed:dev` run twice against a freshly migrated database: **20 products / 18 barcodes / 9 units /
   3 brands / 4 pack conversions / 18 opening movements / 2 branches** both times — the demo catalogue
@@ -345,7 +393,8 @@ Device:
 - Adjustments support a single line per command in the UI (the server accepts multi-line).
 - **Variants and supplier product codes are not built** (deferred rows D4d and D4c): a barcode resolves
   to exactly one product, and pack conversion is available but **quantity/unit entry on the till** is
-  still Phase 5.3 — today the stock adjust dialog and the transfer send/count screens convert units.
+  still Phase 5.3 — today the stock adjust dialog, the transfer send/count screens and the stocktake
+  sheet convert units.
 - **Transfers are branch-to-branch documents on a till, not a network view** (ADR 0008 item 5): the
   consolidated all-branch list, and the branch-creation UI that would give a real shop its second
   shelf, both belong to later phases — the demo seed ships a second, empty branch (West Kiosk) so the
@@ -394,6 +443,10 @@ Device:
 | 29 | Send 1 more crate of Soda: because Main now holds 0, the **supervisor note becomes required** (button disabled until filled, banner says why); dispatch with the note → after sync the card reads **Needs attention — NEGATIVE_STOCK** with the server's sentence, while the goods never move twice | ☐ |
 | 30 | Settings → Branch id `22222222-2222-4222-8222-222222222223` → **Set up** (do this after syncing: a command queued at Main and pushed from a West-enrolled device must come back **Needs attention — BRANCH_MISMATCH**, never vanish) → the document moves to *Coming here* as **Waiting for your count** → **Count what arrived**, change 48 → 46 (a shortage raises the required note), try 50 (refused in place: *a surplus belongs on a supplier receipt*), queue with the note → after sync the card reads **Arrived short**, the line `counted 46 — 2 short` | ☐ |
 | 31 | After the receipt: West Kiosk's Stock shows the 46 it counted, Main's still shows 0 (the 48 it sent is in neither shelf until counted), Main's in-transit list is empty again, and switching Settings back to Main restores Main's view | ☐ |
+| 32 | Stock → **Stocktake**: the info banner says the count goes up as what you READ, never as a plus or minus; *Count everything with stock (n)* prefills a sheet of only what this branch holds **above zero** (Soda, standing at 0 at Main since row 31, is NOT among them); every card shows the product, its **book** and an empty field reading *Not counted yet — a blank line is left out of the count* | ☐ |
+| 33 | Scan `6001000000087` (Soda) → its line appears with book `0 ea`; type `0` → *Agrees with the book — writes nothing*; type `1` → *1 ea found*; tap the **crate** pill → `1 crate = 24 ea` and the words become `24 ea found`; type `-3` into a line → *a count cannot be below zero* in place, the field goes red, and the queue button counts only the valid lines | ☐ |
+| 34 | Fill two sheet lines with their shown **book** (both read *Agrees with the book — writes nothing*), set a third line to `0` (*N <unit> short of the book*), add note `Sunday night count` → **Queue count (n line(s), 1 differ)** → the card says **Queued — pending on this device**; airplane mode before queueing to prove it needs no network | ☐ |
+| 35 | **Sync now** → the count lands: the zeroed product's on-hand is 0, its movement history shows a **Stock count** row with the negative quantity and **by Owner**, the book-agreeing products have NO new movement at all, and `GET /v1/inventory/movements?productId=…` returns `actor_id`/`actor_name` for every row | ☐ |
 
 A failure involving lost transactions, duplicate posting, corrupted local data or a false
 payment/tax status blocks the phase.

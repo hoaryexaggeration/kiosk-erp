@@ -138,6 +138,9 @@ data class ServerMovement(
     val sourceType: String,
     val sourceId: String?,
     val cogsMinor: Long?,
+    /** Who the server holds as having done it — a movement must be attributable (§15, item 4.8). */
+    val actorId: String?,
+    val actorName: String?,
     val occurredAt: String,
 ) {
     /** True when the movement arrived in a pack rather than the unit stock is held in. */
@@ -866,6 +869,8 @@ class ApiClient {
                 sourceType = obj["source_type"]?.jsonPrimitive?.content ?: "",
                 sourceId = obj["source_id"]?.jsonPrimitive?.contentOrNull,
                 cogsMinor = obj["cogs_minor"]?.jsonPrimitive?.contentOrNull?.toLongOrNull(),
+                actorId = obj["actor_id"]?.jsonPrimitive?.contentOrNull,
+                actorName = obj["actor_name"]?.jsonPrimitive?.contentOrNull,
                 occurredAt = obj["occurred_at"]?.jsonPrimitive?.content ?: "",
             )
         } ?: emptyList()

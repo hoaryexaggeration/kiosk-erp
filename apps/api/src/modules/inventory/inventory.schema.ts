@@ -118,6 +118,39 @@ export type DispatchTransfer = Extract<StockTransferPayload, { action: 'dispatch
 export type ReceiveTransfer = Extract<StockTransferPayload, { action: 'receive' }>['transfer'];
 
 /**
+ * A count (item 4.8, §3.D "cycle counts and full stocktakes").
+ *
+ * The payload carries COUNTED quantities, never deltas: the shelf holds N units is a fact about the
+ * shelf, and only the server's book can be subtracted from it. A device whose cached balance has
+ * drifted would otherwise post book + (stale book − counted) and land somewhere neither number
+ * describes — so the variance is derived here, per line, against the balance this branch actually
+ * has.
+ *
+ * `quantity >= 0`: a count cannot be negative — "counted −2 bottles" is not a reading of a shelf.
+ * A line the operator left blank is a line nobody counted, and is simply absent: unlike a transfer
+ * receipt, a cycle count is partial by design and only asserts what was physically seen.
+ */
+export const StocktakeSchema = z.object({
+  stocktake: z.object({
+    id: z.string().uuid(),
+    /** Why this count happened — carried on the audit and the server event, not on each movement. */
+    note: z.string().max(500).optional(),
+    lines: z
+      .array(
+        z.object({
+          productId: z.string().uuid(),
+          /** How many units are on the shelf, written in `unit` when the count used a pack. */
+          quantity: z.number().min(0),
+          unit: z.string().max(16).optional(),
+        }),
+      )
+      .min(1)
+      .max(500),
+  }),
+});
+export type StocktakePayload = z.infer<typeof StocktakeSchema>;
+
+/**
  * Opening-stock import (item 4.5). `csv` or `records` (not both); `commit: false` is a pure preview
  * and a file with any bad row is reported, never partially applied.
  *

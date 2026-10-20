@@ -23,6 +23,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.FactCheck
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Inventory2
@@ -120,6 +121,12 @@ fun InventoryScreen(vm: InventoryViewModel, onOpenCatalogue: () -> Unit = {}) {
         return
     }
 
+    val stocktakeOpen by vm.stocktakeOpen.collectAsState()
+    if (stocktakeOpen) {
+        StocktakeScreen(vm = vm, onBack = vm::closeStocktake)
+        return
+    }
+
     val opening = vm.openingImport.collectAsState().value
     if (opening != null) {
         OpeningStockScreen(state = opening, vm = vm, onPickFile = { filePicker.launch(OPENING_MIME_TYPES) })
@@ -189,6 +196,14 @@ fun InventoryScreen(vm: InventoryViewModel, onOpenCatalogue: () -> Unit = {}) {
             subtitle = "Send stock to another branch and count what arrives — one document, two steps, queued offline",
             icon = Icons.Filled.SwapHoriz,
             onClick = vm::openTransfers,
+        )
+
+        Spacer(Modifier.height(StackGap))
+        NavRow(
+            title = "Stocktake",
+            subtitle = "Count the shelf and queue what differs — every difference becomes a movement with your name on it",
+            icon = Icons.AutoMirrored.Filled.FactCheck,
+            onClick = vm::openStocktake,
         )
 
         Spacer(Modifier.height(StackGap))
@@ -566,6 +581,11 @@ private fun MovementRow(movement: ServerMovement) {
             movement.reason?.takeIf { it.isNotBlank() }?.let {
                 Text(it, style = MaterialTheme.typography.bodySmall)
             }
+            // Who the server holds as having done it: a count — and every other adjustment §15 asks
+            // to be audited — names the person, so history is a record of who did what (item 4.8).
+            movement.actorName?.takeIf { it.isNotBlank() }?.let {
+                Text("by $it", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
             // Only issues carry COGS; showing it makes a stock loss visible in shillings, not just units.
             movement.cogsMinor?.let { cogs ->
                 if (cogs > 0) {
@@ -586,6 +606,7 @@ private fun sourceLabel(sourceType: String): String = when (sourceType) {
     "stock_adjustment" -> "Adjustment"
     "sale" -> "Sale"
     "stock_transfer" -> "Transfer"
+    "stocktake" -> "Stock count"
     else -> sourceType.ifBlank { "Movement" }
 }
 

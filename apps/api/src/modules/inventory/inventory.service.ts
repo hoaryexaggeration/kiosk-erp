@@ -10,6 +10,7 @@ import {
   StockAdjustmentPayload,
   StockReceiptPayload,
   StockTransferPayload,
+  StocktakePayload,
 } from './inventory.schema';
 import { AppError } from '../../common/errors';
 import { parseCsv } from '../../domain/csv';
@@ -122,6 +123,9 @@ const DEFAULT_LOCATION_NAME = 'Store';
 
 /** How many planned lines the report carries before it is truncated — enough to review, bounded. */
 const OPENING_PREVIEW_LIMIT = 100;
+
+/** How many count lines a stocktake's command result echoes back — enough to assert on, bounded. */
+const STOCKTAKE_RESULT_LIMIT = 100;
 
 /** One planned line as it goes back to the operator: the quantity that was and the quantity that will be. */
 export interface OpeningStockPreviewRow {
@@ -645,6 +649,160 @@ export class InventoryService {
       status: reviewRequired ? ('review_required' as const) : ('accepted' as const),
       result: { adjustmentId: adjustment.id, serverSeq: seq, negative, uncosted },
       conflictCodes: reviewRequired ? ['NEGATIVE_STOCK'] : [],
+    };
+  }
+
+  // --- stocktake / cycle count (item 4.8) --------------------------------------------------------
+
+  /**
+   * A count (§3.D "cycle counts and full stocktakes"): the operator reads the shelf, the server
+   * derives the variance against the book it holds, and every line that disagrees becomes an
+   * adjustment movement with reason and actor — "stock quantities cannot be changed without a
+   * movement source" (§15, Phase 4).
+   *
+   * Three properties make this a count rather than a clever edit:
+   * - the payload carries COUNTED quantities, never deltas: "the shelf holds N" is a fact about the
+   *   shelf, so the variance is computed per line against THIS branch's book — a device whose cache
+   *   has drifted would otherwise post book + (stale book − counted) and land at a number nobody
+   *   read;
+   * - a line that agrees with the book writes NOTHING — the movement ledger stays a list of things
+   *   that happened, not of every number somebody called out;
+   * - a count cannot push stock below zero (`quantity >= 0`), so unlike an adjustment it needs no
+   *   supervisor override: the refusals here are about a count that was never a number at all.
+   *
+   * The variance is written in the unit the shelf was counted in when it divides exactly into packs
+   * (`counted 2 crate` against a book of 48 bottles lands as +2 crate), and in the base unit when it
+   * does not — a pack counted against a book that is not a whole number of packs has no whole-pack
+   * truth, and inventing one would put a fraction in a counted unit.
+   */
+  async stocktake(trx: Kysely<Database>, ctx: InventoryContext, payload: StocktakePayload): Promise<ApplyResult> {
+    const count = payload.stocktake;
+    const locationId = await this.getOrCreateLocation(trx, ctx.tenantId, ctx.branchId);
+    let uncosted = false;
+    let convertedLines = 0;
+
+    interface CountedLine {
+      line: StocktakePayload['stocktake']['lines'][number];
+      resolved: ResolvedQuantity;
+    }
+    const prepared: CountedLine[] = [];
+
+    // Resolve EVERY count first — the pack size as well as the product — because a count that is
+    // half applied is worse than one refused: the shelf would be left between two readings.
+    for (const line of count.lines) {
+      const outcome = await this.resolveQuantity(trx, ctx.tenantId, line.productId, line.quantity, line.unit);
+      if (outcome.status === 'missing') continue;
+      if (outcome.status === 'invalid') {
+        return { status: 'rejected' as const, code: outcome.code, message: outcome.message };
+      }
+      if (outcome.resolved.converted) convertedLines += 1;
+      prepared.push({ line, resolved: outcome.resolved });
+    }
+    if (prepared.length === 0) {
+      return {
+        status: 'rejected' as const,
+        code: 'EMPTY_STOCKTAKE',
+        message: 'None of the products on this count exists at this branch',
+      };
+    }
+
+    const rows: Array<{ productId: string; sku: string; name: string; counted: number; unit: string; bookBefore: number; variance: number }> = [];
+    let matchedLines = 0;
+    let varianceLines = 0;
+    let lostValueMinor = 0;
+    let foundValueMinor = 0;
+
+    for (const { line, resolved } of prepared) {
+      const product = await trx
+        .selectFrom('products')
+        .select(['sku', 'name', 'cost_minor'])
+        .where('id', '=', line.productId)
+        .where('tenant_id', '=', ctx.tenantId)
+        .executeTakeFirst();
+      const bookBefore = await this.onHand(trx, ctx.tenantId, ctx.branchId, locationId, line.productId);
+      const countedBase = resolved.baseQuantity;
+      // Float dust from a weighing scale is not a variance: 2.3000000000000003 kg read against 2.3
+      // agrees with the book, and a dust movement would cost the ledger its readability.
+      const rawVariance = countedBase - bookBefore;
+      const variance = Math.abs(rawVariance) < 1e-9 ? 0 : rawVariance;
+      rows.push({
+        productId: line.productId,
+        sku: product?.sku ?? line.productId,
+        name: product?.name ?? line.productId,
+        counted: countedBase,
+        unit: resolved.baseUnit,
+        bookBefore,
+        variance,
+      });
+      if (variance === 0) {
+        matchedLines += 1;
+        continue;
+      }
+      varianceLines += 1;
+
+      const factor = resolved.converted ? resolved.factor : 1;
+      const inEntered = variance / factor;
+      const expressible = Math.abs(inEntered - Math.round(inEntered)) < 1e-9;
+      // Found stock is valued at the last known cost — the rule a receipt follows — rather than at
+      // nothing: a shelf that turns up with goods is still a shelf holding value (ADR 0009).
+      const costMinor = Number(product?.cost_minor ?? 0);
+      const movement = await this.applyMovement(trx, {
+        tenantId: ctx.tenantId,
+        branchId: ctx.branchId,
+        locationId,
+        productId: line.productId,
+        quantityDelta: expressible ? Math.round(inEntered) : variance,
+        unit: expressible ? (line.unit ?? resolved.baseUnit) : resolved.baseUnit,
+        reason: 'stocktake',
+        sourceType: 'stocktake',
+        sourceId: count.id,
+        actorId: ctx.actorId,
+        deviceId: ctx.deviceId,
+        commandId: ctx.commandId,
+        ...(variance > 0 ? { unitCostMinor: costMinor } : {}),
+      });
+      if (movement.uncostedQuantity > 0) uncosted = true;
+      if (movement.baseQuantity > 0) foundValueMinor += roundHalfUp(movement.baseQuantity * costMinor);
+      else lostValueMinor += movement.cogsMinor;
+    }
+
+    await this.events.audit(trx, {
+      tenantId: ctx.tenantId,
+      branchId: ctx.branchId,
+      actorId: ctx.actorId,
+      deviceId: ctx.deviceId,
+      action: 'stock.counted',
+      aggregateType: 'Stocktake',
+      aggregateId: count.id,
+      reason: 'stocktake',
+      after: { countedLines: prepared.length, matchedLines, varianceLines, note: count.note ?? null },
+      correlationId: ctx.correlationId,
+    });
+    const seq = await this.events.serverEvent(trx, {
+      tenantId: ctx.tenantId,
+      branchId: ctx.branchId,
+      eventType: 'stock.counted',
+      aggregateType: 'Stocktake',
+      aggregateId: count.id,
+      payload: { countedLines: prepared.length, matchedLines, varianceLines, uncosted },
+    });
+    await this.events.outbox(trx, ctx.tenantId, 'stock.counted', { stocktakeId: count.id });
+
+    return {
+      status: uncosted ? ('review_required' as const) : ('accepted' as const),
+      result: {
+        stocktakeId: count.id,
+        serverSeq: seq,
+        countedLines: prepared.length,
+        matchedLines,
+        varianceLines,
+        convertedLines,
+        lostValueMinor,
+        foundValueMinor,
+        uncosted,
+        lines: rows.slice(0, STOCKTAKE_RESULT_LIMIT),
+      },
+      conflictCodes: uncosted ? ['UNCOSTED_STOCK'] : [],
     };
   }
 
@@ -1448,6 +1606,9 @@ export class InventoryService {
     let query = this.dbs.db
       .selectFrom('inventory_movements')
       .leftJoin('products', 'products.id', 'inventory_movements.product_id')
+      // Who did it: a count (item 4.8) — like every adjustment §15 asks to be audited — must be able
+      // to show the person on the movement, not only the number.
+      .leftJoin('users', 'users.id', 'inventory_movements.actor_id')
       .select([
         'inventory_movements.id',
         'inventory_movements.product_id',
@@ -1464,6 +1625,8 @@ export class InventoryService {
         'inventory_movements.source_id',
         'inventory_movements.cogs_minor',
         'inventory_movements.occurred_at',
+        'inventory_movements.actor_id',
+        'users.display_name as actor_name',
       ])
       .where('inventory_movements.tenant_id', '=', tenantId)
       .orderBy('inventory_movements.occurred_at', 'desc');

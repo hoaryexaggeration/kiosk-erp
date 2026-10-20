@@ -17,6 +17,7 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import java.time.Instant
 import java.util.UUID
+import kotlin.math.abs
 
 /**
  * Offline stock movements. The server owns stock (append-only movements); a device records the
@@ -121,6 +122,93 @@ class InventoryRepository(private val db: KioskDatabase) {
         }
 
         return AdjustmentResult(adjustmentId)
+    }
+
+    // --- stocktake / cycle count (item 4.8) ---------------------------------------------------
+
+    /** What one line of a count sheet says: the number the operator read off the shelf. */
+    data class StocktakeLineDraft(
+        val productId: String,
+        val sku: String,
+        val name: String,
+        /** The count as typed, in `enteredUnit` — the paperwork the server converts itself. */
+        val enteredQuantity: Double,
+        /** The pack they counted in, or null when they counted in the product's own unit. */
+        val enteredUnit: String?,
+        /** The count in base units — this device's preview only, never the authority (§6). */
+        val baseQuantity: Double,
+    )
+
+    data class StocktakeResult(val stocktakeId: String, val varianceLines: Int, val matchedLines: Int)
+
+    /**
+     * Queue a count. The payload carries COUNTED quantities, never deltas: "the shelf holds N" is a
+     * fact about the shelf, so only the server may subtract its own book from it — a device whose
+     * projection has drifted would otherwise post a variance about a number nobody counted. The
+     * local projection is nudged by the variance this device SEES, purely so the screen does not
+     * contradict the sheet that was just written; the next pull replaces it with the server's own
+     * figure (§6).
+     */
+    suspend fun createStocktake(
+        note: String,
+        lines: List<StocktakeLineDraft>,
+        branchId: String,
+        deviceId: String,
+    ): StocktakeResult {
+        val stocktakeId = UUID.randomUUID().toString()
+        val now = System.currentTimeMillis()
+
+        val payload = buildJsonObject {
+            put("stocktake", buildJsonObject {
+                put("id", stocktakeId)
+                if (note.isNotBlank()) put("note", note.trim())
+                put("lines", buildJsonArray {
+                    lines.forEach { line ->
+                        add(buildJsonObject {
+                            put("productId", line.productId)
+                            put("quantity", line.enteredQuantity)
+                            if (line.enteredUnit != null) put("unit", line.enteredUnit)
+                        })
+                    }
+                })
+            })
+        }
+
+        var varianceLines = 0
+        var matchedLines = 0
+        db.withTransaction {
+            for (line in lines) {
+                val book = db.inventoryDao().byProduct(line.productId)?.quantity ?: 0.0
+                val variance = line.baseQuantity - book
+                // Float dust is not a disagreement here any more than it is on the server: 2.3
+                // counted against 2.3000000000000004 agrees, and would otherwise queue a movement
+                // nobody could read in the history.
+                if (abs(variance) < 1e-9) {
+                    matchedLines += 1
+                    continue
+                }
+                varianceLines += 1
+                addToBalance(line.productId, branchId, line.sku, line.name, variance, now)
+            }
+            db.outboxDao().insert(
+                OutboxEntity(
+                    commandId = UUID.randomUUID().toString(),
+                    aggregateType = "Stocktake",
+                    aggregateId = stocktakeId,
+                    branchId = branchId,
+                    deviceId = deviceId,
+                    payloadJson = payload.toString(),
+                    status = "pending",
+                    attempts = 0,
+                    lastError = null,
+                    conflictCode = null,
+                    createdAtEpochMs = now,
+                    syncedAtEpochMs = null,
+                ),
+            )
+        }
+
+        return StocktakeResult(stocktakeId, varianceLines, matchedLines)
     }
 
     // --- cross-branch transfers (item 4.7, ADR 0008) ---------------------------------------------

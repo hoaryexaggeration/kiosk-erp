@@ -903,5 +903,5 @@ private fun ReceiveTransferScreen(vm: InventoryViewModel, row: TransferRow, onDo
 }
 
 /** 3, not 3.0 — the shape every quantity field starts with. */
-private fun plainNumber(value: Double): String =
+internal fun plainNumber(value: Double): String =
     if (value == Math.floor(value) && !value.isInfinite()) value.toLong().toString() else value.toString()

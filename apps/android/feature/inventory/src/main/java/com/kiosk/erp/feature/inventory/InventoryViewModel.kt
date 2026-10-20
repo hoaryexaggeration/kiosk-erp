@@ -124,6 +124,9 @@ class InventoryViewModel(
     private val _packLookup = MutableStateFlow<List<ProductConversionEntity>>(emptyList())
     val packLookup: StateFlow<List<ProductConversionEntity>> = _packLookup.asStateFlow()
 
+    private val _sheetPacks = MutableStateFlow<Map<String, List<ProductConversionEntity>>>(emptyMap())
+    val sheetPacks: StateFlow<Map<String, List<ProductConversionEntity>>> = _sheetPacks.asStateFlow()
+
     /**
      * Queue a stock adjustment in the unit the operator actually used (item 4.6).
      *
@@ -178,6 +181,19 @@ class InventoryViewModel(
         viewModelScope.launch {
             _packLookup.value = productRepository.conversions(product.id)
         }
+    }
+
+    /**
+     * The pack sizes of every product currently on a count sheet (item 4.8). The dialogs load one
+     * product at a time because they only ever ask about one; a sheet counts many products at once
+     * and offers the packs inline, so it needs the whole set — read from Room, offline, and kept
+     * until the sheet is cleared rather than refetched per keystroke.
+     */
+    suspend fun loadSheetPacks(productIds: Set<String>) {
+        val missing = productIds.filter { it !in _sheetPacks.value }
+        if (missing.isEmpty()) return
+        val loaded = missing.associateWith { productRepository.conversions(it) }
+        _sheetPacks.value = _sheetPacks.value + loaded
     }
 
     fun clearMessage() {
@@ -532,6 +548,54 @@ class InventoryViewModel(
                 deviceId = deviceId,
             )
             _message.value = "Queued the receipt for ${transfer.reference.ifBlank { "this document" }} • waiting to sync"
+        }
+    }
+
+    // --- stocktake / cycle count (item 4.8) -----------------------------------------------------
+
+    private val _stocktakeOpen = MutableStateFlow(false)
+    val stocktakeOpen: StateFlow<Boolean> = _stocktakeOpen.asStateFlow()
+
+    fun openStocktake() {
+        _stocktakeOpen.value = true
+    }
+
+    fun closeStocktake() {
+        _stocktakeOpen.value = false
+    }
+
+    /**
+     * Queue a count. Every line the operator entered a number for goes up, including the ones that
+     * agree with the book: agreeing is still an assertion, and the server writing nothing for it is
+     * exactly what keeps the movement ledger a list of things that happened. A blank line is a shelf
+     * nobody counted yet, and stays behind.
+     */
+    fun queueStocktake(note: String, lines: List<InventoryRepository.StocktakeLineDraft>) {
+        viewModelScope.launch {
+            if (lines.isEmpty()) {
+                _message.value = "Cannot queue the count: enter a number for at least one line"
+                return@launch
+            }
+            val session = sessionStore.current()
+            val branchId = session.branchId
+            val deviceId = session.deviceId
+            if (branchId == null || deviceId == null) {
+                _message.value = "Cannot count: this device is not enrolled against a branch — set it up in Settings"
+                return@launch
+            }
+            val result = inventoryRepository.createStocktake(
+                note = note,
+                lines = lines,
+                branchId = branchId,
+                deviceId = deviceId,
+            )
+            _stocktakeOpen.value = false
+            val summary = buildString {
+                append("${result.varianceLines} line(s) differ from the book")
+                if (result.matchedLines > 0) append(", ${result.matchedLines} agree with it")
+                append(" • waiting to sync")
+            }
+            _message.value = "Count queued — $summary"
         }
     }
 }

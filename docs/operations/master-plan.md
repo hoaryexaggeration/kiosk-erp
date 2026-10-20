@@ -27,7 +27,7 @@ Status key: ✅ present · 🟡 partial · ❌ absent.
 | 1 | Domain contracts, data model, sync spec | 🟡 | Fixtures, sync protocol, posting matrix, ADRs, UoM/pack-size contract (`units-and-conversions.md`) exist; **no OpenAPI skeleton, no ERD, no state machines beyond `Sale`, no event-version policy** |
 | 2 | Backend foundation and cloud controls | 🟡 | NestJS + Postgres + auth/RBAC + devices + licensing + outbox work; **no CI, no staging deploy, no backups/restore drill, no OpenAPI generation, no rate limits, `LicenseBillingModule` absent** |
 | 3 | Native shell, local DB, sync center | 🟡 | Shell, Room, push/pull, Sync Center, enrolment work; **`LicenseManager` request export (`.licreq`/QR), entitlement display, Keystore installation key, replay/rollback detection, app lock/offline expiry absent** |
-| 4 | Catalogue, pricing, inventory ledger | 🟡 | Products/barcodes/tax/categories/promotions + movement ledger + balances work; product CRUD UI, category/units/brands/tax management, bulk import, opening-stock import and movement history UI all in; units + pack conversions + brands now hold one base-unit ledger; cross-branch transfers (dispatch/receipt/discrepancy) now move goods under one document; **no price lists/scheduled prices, no stocktake, no low-stock thresholds, no variants, no supplier product codes** |
+| 4 | Catalogue, pricing, inventory ledger | 🟡 | Products/barcodes/tax/categories/promotions + movement ledger + balances work; product CRUD UI, category/units/brands/tax management, bulk import, opening-stock import and movement history UI all in; units + pack conversions + brands now hold one base-unit ledger; cross-branch transfers (dispatch/receipt/discrepancy) move goods under one document; stocktakes turn a shelf reading into movements with reason and actor; **no price lists/scheduled prices, no low-stock thresholds, no variants, no supplier product codes** |
 | 5 | Offline POS vertical slice | 🟡 | Search, scan, cart, offline cash sale, outbox, idempotent posting work; **no cashier session/role gate, no discounts UI, no price override, no customer on sale, no split tender, no hold/resume, no void, no receipt rendering/printing, no sales-history screen** |
 | 6 | Cash, shifts, refunds, end-of-day | ❌ | `cash_sessions`/`cash_movements` tables only; no float, count, variance, approval, shift close, returns/refunds/exchange |
 | 7 | Customers, suppliers, debtors, creditors | ❌ | `customers`/`suppliers`/`customer_ledger_entries` tables only; no modules, no UI, no credit policy |
@@ -120,7 +120,7 @@ must be completed when its target phase is reached.
 | D4d | Product **variants** (size/flavour/colour as distinct sellable items) — needs its own exit criterion agreed **before Phase 5 starts**, because variants change what the till resolves a barcode to | §3.C | 4 (before Ph5) | ☐ |
 | D5 | Price lists, branch/customer/scheduled prices, price-change history | §3.C | 4 | ☐ |
 | D6 | Stock transfers with dispatch/receipt states | §3.D, §15 Ph4 | 4 ✔ | ✔ |
-| D7 | Stocktake / cycle count | §3.D, §15 Ph4 | 4 | ☐ |
+| D7 | Stocktake / cycle count | §3.D, §15 Ph4 | 4 ✔ | ✔ |
 | D7a | Stock valuation is **FIFO with valuation layers** (ADR 0009), replacing weighted average | §7, §18.5 | 4 ✔ | ✔ |
 | D7b | Till blocks a sale that would take stock negative; `UNCOSTED_STOCK` resolution path | §18.5 | 5 | ☐ |
 | D7c | Branch edge gateway (ADR 0010) — new MVP component | §6, §17 | 5–11 | ☐ |
@@ -168,7 +168,7 @@ each later phase is expanded to the same granularity as it becomes current.
 | 4.5 ✔ | Opening stock import (D3) | Done: `POST /v1/inventory/opening-stock/import` — preview/commit share one pure planner, all-or-nothing, report carries `onHandBefore/After` + three warnings; commit appends `opening_stock` movements that open FIFO layers; `requestId` makes a retried commit idempotent; Stock tab gains an Opening stock screen (file picker or typed lines); 16 unit + 11 endpoint tests |
 | 4.6 ✔ | Units of measure + pack conversions + brands (D4a, D4b) | Done: `units_of_measure` (`kind` = count/weight/volume — the rule, not a label), product-scoped `unit_conversions` as a SET (factor = base units per 1 of the pack), `brands` + `products.brand_id`; `InventoryService.resolveQuantity` is the single conversion point, so a movement is always recorded in `products.unit` and remembers `entered_unit`/`entered_quantity`; receipts, adjustments and opening import all convert, quoted costs divide to cost-per-base, overrides are measured in base; `unit_kind` rides the product payload so a device converts offline; device: Room v4 (brand, conversions, unitKind), product editor pack sizes + brand + unit picker, Manage gains Units & Brands, stock adjust dialog picks a pack and previews `10 crate = 240 ea` with the server's own reference implementation, history shows `10 crate → +240 ea`; 74/74 fixtures + 127/127 API tests; `units-and-conversions.md` |
 | 4.7 ✔ | Cross-branch stock transfers with dispatch/receipt/discrepancy states (D6, ADR 0008) | Done: stock is in exactly one branch or in transit, never both — `stock_transfers` + `stock_transfer_lines` (one document, two per-branch steps, `from <> to` and status↔`received_at` by CHECK, `UNIQUE (tenant, reference)`); dispatch consumes the source's FIFO layers (`costMode: 'transfer'` — allocations, no COGS) and stamps a carried cost per base unit on each line, the receipt opens the destination's layer at that same cost; in transit belongs to **neither** branch; shortages stay on the document as `discrepancy` and need a supervisor note, over-receipt refused; `TRF-0001` from a tenant-wide series; `inventory.transfer` + branch-scoped list (ADR 0008 item 5, pushOne `BRANCH_MISMATCH`); device: Room v5 (transfers + lines + branches), outbox `StockTransfer` commands, direction pills, send/count screens, in-transit under Stock rows; 74/74 fixtures + 145/145 API tests; `stock-transfers.md` |
-| 4.8 | Stocktake / cycle count (D7) | A count produces adjustment movements with reason and actor |
+| 4.8 ✔ | Stocktake / cycle count (D7) | Done: the device sends **counted** quantities (never deltas) and the server derives each variance against its own book — agreement writes **nothing**, disagreement writes one movement with `reason: 'stocktake'` and the actor on it; short variances book FIFO cost, found stock opens a layer at the last known cost; pack counts land as the pack only when the variance divides exactly; `quantity >= 0` means a count can never need the negative-stock override; `inventory.adjust`, one `Stocktake` outbox command (offline), uncosted shortages → `review_required` + `UNCOSTED_STOCK`; device: Stock → Stocktake count sheet with pack pills, variance **in words**, `Stock count` + `by <name>` in history; 74/74 fixtures + 156/156 API tests; `stocktake-count.md` |
 | 4.9 | Low-stock thresholds and alerts (D8) | Threshold breach is visible on the Stock screen |
 | 4.10 ✔ | Movement history UI per product/location (D8) | Done: per-product history in the Stock tab (source, signed quantity, reason, date, COGS); reads the server ledger |
 | 4.11 | Price lists / branch prices / scheduled prices + price-change history (D5) | A price change is versioned; a stale device price is flagged, never silently overwritten |
@@ -362,6 +362,50 @@ and between those moments the goods belong to neither shelf but to the document.
 - Documented in `docs/operations/stock-transfers.md`; 18 endpoint tests in `transfers.spec.ts`
   (both halves end to end, the conservation and cost claims, every refusal, branch scoping,
   numbering, idempotent replay).
+
+#### Stocktakes and cycle counts (v0.4.8, item 4.8)
+
+The exit criterion is a ledger-integrity rule: **a count produces adjustment movements with reason
+and actor** — stock quantities are never edited in place (§15: "audit every adjustment"). A stocktake
+is therefore the same append-only fact machinery as everything else, pointed at the one question
+nobody else can answer: how many units are actually on this shelf.
+
+- **Counted quantities, never deltas.** The payload says `counted: 20`; the server subtracts *its*
+  book. A device whose cached projection has drifted would otherwise post `book + (stale book −
+  counted)` and land at a number nobody read — so the variance is derived per line where the book is
+  authoritative (§6).
+- **Agreement writes nothing.** A line that matches the book is reported (`matchedLines`) but leaves
+  no movement: the ledger is a list of things that happened, not of every number somebody called
+  out. Float dust is agreement too (`2.3000000000000003` vs `2.3`), or a weighing scale would
+  populate history with movements of `4e-15 kg`.
+- **The movement remembers the paperwork.** A pack count whose variance divides exactly lands as the
+  pack (`counted 2 crate` against a book of 48 → `entered_unit: crate`, `entered_quantity: 2`,
+  `quantity_delta: +48`... the variance `-1 crate`); one that does not lands in base units, because
+  a fraction of a crate is not something a shelf can hold. Both halves go through
+  `applyMovement`, the single conversion choke point (item 4.6).
+- **Valuation stays honest.** A short variance consumes FIFO layers and books `cogs_minor` (shrinkage
+  is a loss in shillings too); found stock opens a layer at `products.cost_minor` — the last known
+  cost, the rule a receipt follows — rather than at zero. A shortage with no layer left behind is
+  `review_required` + `UNCOSTED_STOCK` with a durable conflict case: `cogs_minor` stays `NULL`
+  ("never costed") rather than becoming a confident `0` ("costed at nothing").
+- **No supervisor note, by arithmetic.** `quantity >= 0` means a count's result is always >= 0, so a
+  count can never push stock below zero — the owner's "adjustments need supervisor override" rule
+  (which is about going negative) never triggers. The refusals here are about a number that was
+  never a number: `VALIDATION_ERROR` for a negative count, `FRACTIONAL_QUANTITY` for `20.5 ea`,
+  `EMPTY_STOCKTAKE` when none of the named products exists here (unknown lines are dropped — a stale
+  cache must not block a real count).
+- **Offline like everything else.** One `Stocktake` outbox command per sheet, id `device`-chosen,
+  mapped to **`inventory.adjust`** (a count *produces* adjustments, so it wears their permission) and
+  constrained to the enrolled branch (`BRANCH_MISMATCH`). Replay returns `duplicate` — one sheet is
+  never counted twice.
+- **Device**: Stock → *Stocktake* — scan or IME to add a line (scanner's Enter resolves it against
+  Room), *Count everything with stock (n)* for the full-sheet case, pack pills per line, and the
+  variance **in words** (`Agrees with the book — writes nothing`, `26 ea short of the book`,
+  `5 ea found`). The local projection is nudged by what the device sees so the screen never
+  contradicts the sheet; the next pull replaces it with the server's figure. History labels these
+  rows *Stock count* and now shows `by <name>` — the API's movement history exposes
+  `actor_id`/`actor_name` for every movement, not only counts.
+- Documented in `docs/operations/stocktake-count.md`; 11 endpoint tests in `stocktake.spec.ts`.
 
 ### Phase 5 — Offline POS vertical slice (current phase)
 
