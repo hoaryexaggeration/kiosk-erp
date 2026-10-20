@@ -10,6 +10,8 @@ import { hashSecret } from '../common/password';
 export const SEED = {
   tenantId: '11111111-1111-4111-8111-111111111111',
   branchId: '22222222-2222-4222-8222-222222222222',
+  /** Second demo branch (item 4.7): a transfer needs somewhere to go on a single phone. */
+  westBranchId: '22222222-2222-4222-8222-222222222223',
   ownerId: '33333333-3333-4333-8333-333333333333',
   cashierId: '33333333-3333-4333-8333-333333333334',
   ownerRoleId: '44444444-4444-4444-8444-444444444441',
@@ -153,8 +155,14 @@ export async function seedDev(dbs: DbService): Promise<void> {
 
     await trx
       .insertInto('branches')
-      .values({ id: SEED.branchId, tenant_id: SEED.tenantId, code: 'MAIN', name: 'Main Kiosk' })
-      .onConflict((oc) => oc.column('id').doNothing())
+      .values([
+        { id: SEED.branchId, tenant_id: SEED.tenantId, code: 'MAIN', name: 'Main Kiosk' },
+        // Item 4.7's second shelf: the demo has to let one phone send goods across a branch line,
+        // and there is deliberately no branch-creation endpoint yet (that is catalogue/branch
+        // management, not stock). Seeded empty — it receives, it does not start with stock.
+        { id: SEED.westBranchId, tenant_id: SEED.tenantId, code: 'WEST', name: 'West Kiosk' },
+      ])
+      .onConflict((oc) => oc.columns(['tenant_id', 'code']).doNothing())
       .execute();
 
     await trx
@@ -407,7 +415,7 @@ if (require.main === module) {
       console.log(`  owner:   ${SEED.ownerEmail} / ${SEED.password}`);
       console.log(`  cashier: ${SEED.cashierEmail} / ${SEED.password}`);
       console.log(`  tenant:  ${SEED.tenantId}`);
-      console.log(`  branch:  ${SEED.branchId}`);
+      console.log(`  branch:  ${SEED.branchId} (Main) + ${SEED.westBranchId} (West — item 4.7's second shelf)`);
       console.log(`  catalogue: ${DEMO_CATALOGUE.length + 2} products in ${DEMO_CATEGORIES.length} categories (see docs/operations/demo-catalogue.md)`);
       console.log(
         `  units:    ${DEMO_UNITS.length} units, ${DEMO_BRANDS.length} brands, ` +

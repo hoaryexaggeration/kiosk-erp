@@ -3,7 +3,14 @@ import { Kysely, sql } from 'kysely';
 import { Database } from '../../db/database';
 import { DbService } from '../../db/db.service';
 import { EventsService } from '../platform/events.service';
-import { OpeningStockImportInput, StockAdjustmentPayload, StockReceiptPayload } from './inventory.schema';
+import {
+  DispatchTransfer,
+  OpeningStockImportInput,
+  ReceiveTransfer,
+  StockAdjustmentPayload,
+  StockReceiptPayload,
+  StockTransferPayload,
+} from './inventory.schema';
 import { AppError } from '../../common/errors';
 import { parseCsv } from '../../domain/csv';
 import {
@@ -46,16 +53,29 @@ export interface ApplyMovement {
    * `receiveStock`, which divides by the same factor it multiplied the quantity by.
    */
   unitCostMinor?: number;
+  /**
+   * What an outbound movement does with the cost it draws out of the layers:
+   *
+   * - `expense` (the default) books it as `cogs_minor` — goods that left the business (a sale, a
+   *   write-off, shrinkage).
+   * - `transfer` draws the same layers but books NO cost of goods sold, because those goods did not
+   *   leave the business: the cost travels with them (item 4.7) and is reopened as a layer at the
+   *   destination. `consumedCostMinor` then reports what travelled, which is what the transfer
+   *   document stores so the two branches stay valued at one amount.
+   */
+  costMode?: 'expense' | 'transfer';
 }
 
 export interface MovementResult {
   /** Resulting on-hand quantity (derived projection). */
   quantity: number;
-  /** FIFO cost consumed by an outbound movement; 0 for inbound. */
+  /** FIFO cost booked as cost of goods sold/lost by an outbound movement; 0 for inbound and for a transfer. */
   cogsMinor: number;
+  /** FIFO cost actually drawn out of the layers — equals `cogsMinor` unless the movement carried it elsewhere. */
+  consumedCostMinor: number;
   /** Outbound quantity with no layer to draw on — i.e. stock went negative. */
   uncostedQuantity: number;
-  /** The quantity actually written to the ledger, in the base unit (item 4.6). */
+  /** The quantity actually written to the ledger, in the base unit and signed like the delta (item 4.6). */
   baseQuantity: number;
 }
 
@@ -288,7 +308,8 @@ export class InventoryService {
   /**
    * The single write path for on-hand stock. Appends the movement fact, updates the derived
    * balance, and applies FIFO valuation (ADR 0009): a receipt opens a cost layer; an issue
-   * consumes the oldest open layers and records exactly what it cost.
+   * consumes the oldest open layers and records exactly what it cost — except `costMode: 'transfer'`,
+   * which consumes them so the cost can be reopened at the destination instead of being sold.
    *
    * This is also the choke point for item 4.6: whatever unit a caller's quantity is written in, the
    * row that lands records the BASE quantity and base unit, so no path — a receipt in crates, an
@@ -344,6 +365,7 @@ export class InventoryService {
     const quantity = Number(row.rows[0]?.quantity ?? 0);
 
     let cogsMinor = 0;
+    let consumedCostMinor = 0;
     let uncostedQuantity = 0;
 
     if (baseQuantity > 0) {
@@ -401,18 +423,21 @@ export class InventoryService {
             amount_minor: amount,
           })
           .execute();
-        cogsMinor += amount;
+        consumedCostMinor += amount;
         needed -= take;
       }
       uncostedQuantity = needed > 0 ? needed : 0;
+      // A transfer draws the same cost out of the source's layers but does not sell or lose it, so
+      // the movement records no cost of goods sold — the figure belongs to whichever branch ends up
+      // holding the goods (item 4.7). Everything else books it here, in the transaction that
+      // recorded the fact; the quantity/reason/actor fields of a movement are never rewritten.
+      cogsMinor = (m.costMode ?? 'expense') === 'transfer' ? 0 : consumedCostMinor;
       if (cogsMinor !== 0) {
-        // Derived cost is filled in within the same transaction that recorded the fact; the
-        // quantity/reason/actor fields of a movement are never rewritten.
         await trx.updateTable('inventory_movements').set({ cogs_minor: cogsMinor }).where('id', '=', movementId).execute();
       }
     }
 
-    return { quantity, cogsMinor, uncostedQuantity, baseQuantity };
+    return { quantity, cogsMinor, consumedCostMinor, uncostedQuantity, baseQuantity };
   }
 
   /** Remaining value of open FIFO layers for one product at one location. */
@@ -621,6 +646,511 @@ export class InventoryService {
       result: { adjustmentId: adjustment.id, serverSeq: seq, negative, uncosted },
       conflictCodes: reviewRequired ? ['NEGATIVE_STOCK'] : [],
     };
+  }
+
+  // --- cross-branch transfers (item 4.7, ADR 0008) ----------------------------------------------
+
+  /**
+   * One document, two per-branch steps: the source dispatches, the destination receives, and no
+   * command ever writes the other branch's ledger (ADR 0008 item 5 — the branch a command applies
+   * to is `command.branchId`, which sync checks against the device's enrolment).
+   *
+   * Between those two steps the goods are held by NEITHER branch: dispatch removes them from the
+   * source and the destination counts them in later, so at no instant is the same stock counted in
+   * two branches — the exit criterion for this item.
+   */
+  async applyTransfer(trx: Kysely<Database>, ctx: InventoryContext, payload: StockTransferPayload): Promise<ApplyResult> {
+    return payload.action === 'dispatch'
+      ? this.dispatchTransfer(trx, ctx, payload.transfer)
+      : this.receiveTransfer(trx, ctx, payload.transfer);
+  }
+
+  /** Step 1 — stock leaves the source branch and the document enters `dispatched`. */
+  private async dispatchTransfer(trx: Kysely<Database>, ctx: InventoryContext, transfer: DispatchTransfer): Promise<ApplyResult> {
+    const destination = await trx
+      .selectFrom('branches')
+      .select(['id', 'name'])
+      .where('id', '=', transfer.toBranchId)
+      .where('tenant_id', '=', ctx.tenantId)
+      .executeTakeFirst();
+    if (!destination) {
+      return { status: 'rejected', code: 'UNKNOWN_BRANCH', message: `Branch ${transfer.toBranchId} does not belong to this shop` };
+    }
+    if (transfer.toBranchId === ctx.branchId) {
+      return { status: 'rejected', code: 'SAME_BRANCH', message: 'A transfer needs a destination other than this branch — send it somewhere else, or post it as an adjustment here' };
+    }
+
+    const locationId = await this.getOrCreateLocation(trx, ctx.tenantId, ctx.branchId);
+
+    interface PreparedDispatch {
+      line: DispatchTransfer['lines'][number];
+      product: { sku: string; costMinor: number };
+      resolved: ResolvedQuantity;
+    }
+    const prepared: PreparedDispatch[] = [];
+
+    // Resolve EVERY line before writing anything: a transfer is dispatched whole or not at all,
+    // because a partly dispatched document would tell the destination a story the source's ledger
+    // cannot back up. A product this branch does not know is dropped, as on a receipt; if that
+    // empties the document there is nothing to send and no document is created.
+    for (const line of transfer.lines) {
+      const product = await trx
+        .selectFrom('products')
+        .select(['sku', 'cost_minor', 'deleted_at'])
+        .where('id', '=', line.productId)
+        .where('tenant_id', '=', ctx.tenantId)
+        .executeTakeFirst();
+      if (!product || product.deleted_at) continue;
+      const outcome = await this.resolveQuantity(trx, ctx.tenantId, line.productId, line.quantity, line.unit);
+      if (outcome.status === 'missing') continue;
+      if (outcome.status === 'invalid') return { status: 'rejected', code: outcome.code, message: outcome.message };
+      prepared.push({ line, product: { sku: product.sku, costMinor: Number(product.cost_minor) }, resolved: outcome.resolved });
+    }
+    if (prepared.length === 0) {
+      return { status: 'rejected', code: 'EMPTY_TRANSFER', message: 'None of the products on this transfer exists at this branch' };
+    }
+
+    // Sending what this branch does not have would push the source below zero. A supervisor note
+    // overrides it exactly as for a negative adjustment (ADR 0009) — one rule, one outcome — and a
+    // dispatch without one is refused rather than queued for a surprise at the next sync.
+    if (!transfer.approvalNote) {
+      for (const { line, product, resolved } of prepared) {
+        const available = await this.onHand(trx, ctx.tenantId, ctx.branchId, locationId, line.productId);
+        if (available >= resolved.baseQuantity) continue;
+        return {
+          status: 'rejected',
+          code: 'INSUFFICIENT_STOCK',
+          message: `${product.sku}: ${resolved.baseQuantity} ${resolved.baseUnit} asked for but only ${available} on hand at this branch — receive the stock first, or have a supervisor approve sending it`,
+          conflictCodes: ['NEGATIVE_STOCK'],
+        };
+      }
+    }
+
+    const reference = await this.nextTransferReference(trx, ctx.tenantId);
+    await trx
+      .insertInto('stock_transfers')
+      .values({
+        id: transfer.id,
+        tenant_id: ctx.tenantId,
+        reference,
+        from_branch_id: ctx.branchId,
+        to_branch_id: transfer.toBranchId,
+        status: 'dispatched',
+        note: transfer.note ?? null,
+        dispatched_by: ctx.actorId,
+        dispatched_at: new Date(),
+        received_by: null,
+        received_at: null,
+        approved_by: transfer.approvedBy ?? null,
+        approval_note: transfer.approvalNote ?? null,
+        line_count: prepared.length,
+      })
+      .execute();
+
+    let negative = false;
+    let uncosted = false;
+    let dispatchedValueMinor = 0;
+
+    for (const { line, product, resolved } of prepared) {
+      const movement = await this.applyMovement(trx, {
+        tenantId: ctx.tenantId,
+        branchId: ctx.branchId,
+        locationId,
+        productId: line.productId,
+        // The ENTERED quantity and unit, exactly as on a receipt or an adjustment: `applyMovement`
+        // is the one place that converts a pack into base units, and it records what was written.
+        quantityDelta: -line.quantity,
+        unit: line.unit ?? resolved.baseUnit,
+        reason: 'transfer_out',
+        sourceType: 'stock_transfer',
+        sourceId: transfer.id,
+        actorId: ctx.actorId,
+        deviceId: ctx.deviceId,
+        commandId: ctx.commandId,
+        approvedBy: transfer.approvedBy ?? null,
+        approvalNote: transfer.approvalNote ?? null,
+        // The goods leave this branch, not the business: their cost is drawn out of the source's
+        // layers and carried on the line below, ready to be reopened as a layer at the destination.
+        costMode: 'transfer',
+      });
+      if (movement.quantity < 0) negative = true;
+      if (movement.uncostedQuantity > 0) uncosted = true;
+
+      // A movement's `baseQuantity` is SIGNED — a dispatch writes a negative delta — while a
+      // document line is simply a quantity of goods that went out, so the sign goes and the size
+      // stays. That number is what the destination will later count against.
+      const dispatchedQuantity = Math.abs(movement.baseQuantity);
+
+      // What travelled, per base unit: the source's FIFO cost spread over the units sent, so the
+      // value is preserved exactly whatever the layers were made of. Stock with no layers to draw
+      // on falls back to the product's latest known cost, the rule a receipt already follows — a
+      // branch must never hand goods over valued at nothing.
+      const unitCostMinor = movement.consumedCostMinor > 0 ? roundHalfUp(movement.consumedCostMinor / dispatchedQuantity) : product.costMinor;
+
+      await trx
+        .insertInto('stock_transfer_lines')
+        .values({
+          id: crypto.randomUUID(),
+          tenant_id: ctx.tenantId,
+          transfer_id: transfer.id,
+          product_id: line.productId,
+          unit: resolved.baseUnit,
+          entered_unit: resolved.converted ? (line.unit ?? null) : null,
+          entered_quantity: resolved.converted ? line.quantity : null,
+          quantity_dispatched: dispatchedQuantity,
+          quantity_received: null,
+          unit_cost_minor: unitCostMinor,
+        })
+        .execute();
+      dispatchedValueMinor += roundHalfUp(dispatchedQuantity * unitCostMinor);
+    }
+
+    const seq = await this.events.serverEvent(trx, {
+      tenantId: ctx.tenantId,
+      branchId: ctx.branchId,
+      eventType: 'stock.transfer.dispatched',
+      aggregateType: 'StockTransfer',
+      aggregateId: transfer.id,
+      payload: { reference, fromBranchId: ctx.branchId, toBranchId: transfer.toBranchId, status: 'dispatched', lineCount: prepared.length },
+    });
+    await this.events.audit(trx, {
+      tenantId: ctx.tenantId,
+      branchId: ctx.branchId,
+      actorId: ctx.actorId,
+      deviceId: ctx.deviceId,
+      action: 'stock.transfer.dispatched',
+      aggregateType: 'StockTransfer',
+      aggregateId: transfer.id,
+      reason: transfer.approvalNote ?? null,
+      after: { reference, toBranchId: transfer.toBranchId, lineCount: prepared.length, dispatchedValueMinor, negative, uncosted },
+      correlationId: ctx.correlationId,
+    });
+    await this.events.outbox(trx, ctx.tenantId, 'stock.transfer.dispatched', { transferId: transfer.id, reference, toBranchId: transfer.toBranchId });
+
+    // Dispatching into negative stock (or from stock nobody has costed) is an exception, not a
+    // silent success: the device shows it under "needs attention", same as a negative adjustment.
+    const reviewRequired = negative || uncosted;
+    return {
+      status: reviewRequired ? ('review_required' as const) : ('accepted' as const),
+      result: { transferId: transfer.id, reference, serverSeq: seq, negative, uncosted, lineCount: prepared.length },
+      conflictCodes: reviewRequired ? ['NEGATIVE_STOCK'] : [],
+    };
+  }
+
+  /** Step 2 — the destination counts what arrived, and the document closes as received or short. */
+  private async receiveTransfer(trx: Kysely<Database>, ctx: InventoryContext, transfer: ReceiveTransfer): Promise<ApplyResult> {
+    const document = await trx
+      .selectFrom('stock_transfers')
+      .select(['reference', 'from_branch_id', 'to_branch_id', 'status'])
+      .where('id', '=', transfer.id)
+      .where('tenant_id', '=', ctx.tenantId)
+      .executeTakeFirst();
+    if (!document) {
+      return { status: 'rejected', code: 'UNKNOWN_TRANSFER', message: `No transfer ${transfer.id} on this server` };
+    }
+    if (document.to_branch_id !== ctx.branchId) {
+      return {
+        status: 'rejected',
+        code: 'NOT_TRANSFER_DESTINATION',
+        message: `Transfer ${document.reference} is addressed to another branch — the branch that sent it cannot receive it`,
+      };
+    }
+    if (document.status !== 'dispatched') {
+      return {
+        status: 'rejected',
+        code: 'ALREADY_RECEIVED',
+        message: `Transfer ${document.reference} was already received (${document.status}) — goods that turn up later arrive on a receipt or a new transfer`,
+      };
+    }
+
+    const lines = await trx
+      .selectFrom('stock_transfer_lines')
+      .innerJoin('products', 'products.id', 'stock_transfer_lines.product_id')
+      .select([
+        'stock_transfer_lines.id',
+        'stock_transfer_lines.product_id',
+        'stock_transfer_lines.unit',
+        'stock_transfer_lines.quantity_dispatched',
+        'stock_transfer_lines.unit_cost_minor',
+        'products.sku',
+      ])
+      .where('stock_transfer_lines.transfer_id', '=', transfer.id)
+      .where('stock_transfer_lines.tenant_id', '=', ctx.tenantId)
+      .execute();
+
+    const counted = new Map(transfer.lines.map((l) => [l.productId, l.quantityReceived]));
+    // A receipt must account for every dispatched line and no others. A line the document does not
+    // carry is an invented count; a line the receipt omits is an unexplained one — neither is a
+    // discrepancy the server can approve on someone's behalf.
+    const invented = transfer.lines.find((l) => !lines.some((row) => row.product_id === l.productId));
+    if (invented) {
+      return { status: 'rejected', code: 'UNKNOWN_RECEIPT_LINE', message: `Transfer ${document.reference} does not carry product ${invented.productId}` };
+    }
+    const omitted = lines.find((row) => !counted.has(row.product_id));
+    if (omitted) {
+      return { status: 'rejected', code: 'MISSING_RECEIPT_LINE', message: `Count ${omitted.sku} as well — transfer ${document.reference} sent it and the receipt does not say what arrived` };
+    }
+
+    let shortage = false;
+    for (const row of lines) {
+      const received = counted.get(row.product_id) ?? 0;
+      const dispatched = Number(row.quantity_dispatched);
+      if (received > dispatched) {
+        return {
+          status: 'rejected',
+          code: 'RECEIVED_MORE_THAN_SENT',
+          message: `${row.sku}: ${received} ${row.unit} received but only ${dispatched} was sent — stock that arrives unexpectedly belongs on a supplier receipt, not a transfer`,
+        };
+      }
+      if (received < dispatched) shortage = true;
+    }
+    // Every shortage needs a supervisor note (owner decision, item 4.7): the note is what turns a
+    // count into a decision, and it is refused BEFORE anything is written so nothing half-applies.
+    if (shortage && !transfer.approvalNote) {
+      return {
+        status: 'rejected',
+        code: 'OVERRIDE_REQUIRED',
+        message: `Transfer ${document.reference} is short of what was sent; a supervisor override note is required`,
+        conflictCodes: ['TRANSFER_SHORTAGE'],
+      };
+    }
+
+    const locationId = await this.getOrCreateLocation(trx, ctx.tenantId, ctx.branchId);
+    let receivedValueMinor = 0;
+    let shortageQuantity = 0;
+    let shortageValueMinor = 0;
+
+    for (const row of lines) {
+      const received = counted.get(row.product_id) ?? 0;
+      const dispatched = Number(row.quantity_dispatched);
+      const unitCostMinor = Number(row.unit_cost_minor);
+
+      if (received > 0) {
+        // The cost travelled with the goods (stamped at dispatch), so the destination opens its
+        // layer at the very amount the source's layers gave up — the two sides can never disagree.
+        await this.applyMovement(trx, {
+          tenantId: ctx.tenantId,
+          branchId: ctx.branchId,
+          locationId,
+          productId: row.product_id,
+          quantityDelta: received,
+          unit: row.unit,
+          reason: 'transfer_in',
+          sourceType: 'stock_transfer',
+          sourceId: transfer.id,
+          actorId: ctx.actorId,
+          deviceId: ctx.deviceId,
+          commandId: ctx.commandId,
+          approvedBy: transfer.approvedBy ?? null,
+          approvalNote: transfer.approvalNote ?? null,
+          unitCostMinor,
+        });
+        receivedValueMinor += roundHalfUp(received * unitCostMinor);
+      }
+
+      // The shortfall is recorded on the document, NOT as a second movement: those units are
+      // already out of the source, so writing them off again would delete stock twice. Their value
+      // leaves with them — which is why a shortage is worth approving rather than ignoring.
+      const short = dispatched - received;
+      if (short > 0) {
+        shortageQuantity += short;
+        shortageValueMinor += roundHalfUp(short * unitCostMinor);
+      }
+
+      await trx
+        .updateTable('stock_transfer_lines')
+        .set({ quantity_received: received })
+        .where('id', '=', row.id)
+        .execute();
+    }
+
+    const status = shortage ? ('discrepancy' as const) : ('received' as const);
+    await trx
+      .updateTable('stock_transfers')
+      .set({
+        status,
+        received_by: ctx.actorId,
+        received_at: new Date(),
+        approved_by: transfer.approvedBy ?? null,
+        approval_note: transfer.approvalNote ?? null,
+      })
+      .where('id', '=', transfer.id)
+      .execute();
+
+    const seq = await this.events.serverEvent(trx, {
+      tenantId: ctx.tenantId,
+      branchId: ctx.branchId,
+      eventType: 'stock.transfer.received',
+      aggregateType: 'StockTransfer',
+      aggregateId: transfer.id,
+      payload: { reference: document.reference, fromBranchId: document.from_branch_id, toBranchId: document.to_branch_id, status, shortage: shortageQuantity },
+    });
+    await this.events.audit(trx, {
+      tenantId: ctx.tenantId,
+      branchId: ctx.branchId,
+      actorId: ctx.actorId,
+      deviceId: ctx.deviceId,
+      action: 'stock.transfer.received',
+      aggregateType: 'StockTransfer',
+      aggregateId: transfer.id,
+      reason: transfer.approvalNote ?? null,
+      after: { reference: document.reference, status, receivedValueMinor, shortageQuantity, shortageValueMinor },
+      correlationId: ctx.correlationId,
+    });
+    await this.events.outbox(trx, ctx.tenantId, 'stock.transfer.received', { transferId: transfer.id, reference: document.reference, status });
+
+    return {
+      status: shortage ? ('review_required' as const) : ('accepted' as const),
+      result: {
+        transferId: transfer.id,
+        reference: document.reference,
+        status,
+        serverSeq: seq,
+        shortageQuantity,
+        shortageValueMinor,
+        receivedValueMinor,
+      },
+      conflictCodes: shortage ? ['TRANSFER_SHORTAGE'] : [],
+    };
+  }
+
+  /**
+   * `TRF-0001` — a tenant-wide series, so two branches quoting a reference over the phone can only
+   * be talking about one transfer. The row is created if missing (the partial unique index from
+   * migration 0006 keeps one per tenant) and the UPDATE takes the row lock, so two branches
+   * dispatching at the same instant cannot be handed the same number.
+   */
+  private async nextTransferReference(trx: Kysely<Database>, tenantId: string): Promise<string> {
+    await trx
+      .insertInto('numbering_series')
+      .values({ tenant_id: tenantId, branch_id: null, name: 'transfers', prefix: 'TRF-', next_value: 1 })
+      .onConflict((oc) => oc.doNothing())
+      .execute();
+    const row = await trx
+      .updateTable('numbering_series')
+      .set({ next_value: sql<number>`next_value + 1` })
+      .where('tenant_id', '=', tenantId)
+      .where('name', '=', 'transfers')
+      .where('branch_id', 'is', null)
+      .returning('next_value')
+      .executeTakeFirstOrThrow();
+    return `TRF-${String(Number(row.next_value) - 1).padStart(4, '0')}`;
+  }
+
+  /** The branch a device is enrolled against, or null when it cannot be established (§9 scoping). */
+  async deviceBranch(tenantId: string, deviceId: string): Promise<string | null> {
+    const device = await this.dbs.db
+      .selectFrom('devices')
+      .select('branch_id')
+      .where('id', '=', deviceId)
+      .where('tenant_id', '=', tenantId)
+      .executeTakeFirst();
+    return device?.branch_id ?? null;
+  }
+
+  /**
+   * Transfers this branch is party to, newest first, with the branch names both sides need to say
+   * where the goods are. Scoped to the one branch asked for (ADR 0008 item 5: a till reads its own
+   * branch's stock; the consolidated cross-branch view belongs to a reporting role in Phase 9).
+   */
+  async transfers(tenantId: string, branchId: string, deviceId: string | undefined, limit = 200) {
+    // A device may only ask about its own branch — otherwise any till could read the movement
+    // between two branches it does not run. A session with no device (an operator at a desk) is
+    // free to ask about any branch of its own tenant.
+    if (deviceId) {
+      const enrolled = await this.deviceBranch(tenantId, deviceId);
+      if (enrolled && enrolled !== branchId) {
+        throw new AppError('BRANCH_MISMATCH', 'This device is enrolled against another branch', 403);
+      }
+    }
+
+    const rows = await this.dbs.db
+      .selectFrom('stock_transfers')
+      .where('tenant_id', '=', tenantId)
+      .where(({ eb, or }) => or([eb('from_branch_id', '=', branchId), eb('to_branch_id', '=', branchId)]))
+      .orderBy('dispatched_at', 'desc')
+      .limit(Math.min(Math.max(limit, 1), 500))
+      .selectAll()
+      .execute();
+    if (rows.length === 0) return [];
+
+    const branchIds = [...new Set(rows.flatMap((r) => [r.from_branch_id, r.to_branch_id]))];
+    const branches = await this.dbs.db
+      .selectFrom('branches')
+      .select(['id', 'name'])
+      .where('tenant_id', '=', tenantId)
+      .where('id', 'in', branchIds)
+      .execute();
+    const branchName = new Map(branches.map((b) => [b.id, b.name]));
+
+    const lineRows = await this.dbs.db
+      .selectFrom('stock_transfer_lines')
+      .innerJoin('products', 'products.id', 'stock_transfer_lines.product_id')
+      .select([
+        'stock_transfer_lines.transfer_id',
+        'stock_transfer_lines.product_id',
+        'stock_transfer_lines.unit',
+        'stock_transfer_lines.entered_unit',
+        'stock_transfer_lines.entered_quantity',
+        'stock_transfer_lines.quantity_dispatched',
+        'stock_transfer_lines.quantity_received',
+        'stock_transfer_lines.unit_cost_minor',
+        'products.sku',
+        'products.name',
+      ])
+      .where(
+        'stock_transfer_lines.transfer_id',
+        'in',
+        rows.map((r) => r.id),
+      )
+      .where('stock_transfer_lines.tenant_id', '=', tenantId)
+      .execute();
+    const byTransfer = new Map<string, typeof lineRows>();
+    for (const line of lineRows) {
+      const list = byTransfer.get(line.transfer_id) ?? [];
+      list.push(line);
+      byTransfer.set(line.transfer_id, list);
+    }
+
+    return rows.map((row) => {
+      const lines = (byTransfer.get(row.id) ?? []).map((line) => {
+        const dispatched = Number(line.quantity_dispatched);
+        const received = line.quantity_received === null ? null : Number(line.quantity_received);
+        return {
+          productId: line.product_id,
+          sku: line.sku,
+          name: line.name,
+          unit: line.unit,
+          enteredUnit: line.entered_unit,
+          enteredQuantity: line.entered_quantity === null ? null : Number(line.entered_quantity),
+          dispatched,
+          received,
+          unitCostMinor: Number(line.unit_cost_minor),
+          // What is still missing on this line — 0 while the transfer is open (nobody has counted
+          // yet, so nothing is missing), the shortfall once it has been received short.
+          shortage: received === null ? 0 : Math.max(dispatched - received, 0),
+        };
+      });
+      return {
+        id: row.id,
+        reference: row.reference,
+        fromBranchId: row.from_branch_id,
+        toBranchId: row.to_branch_id,
+        fromBranchName: branchName.get(row.from_branch_id) ?? row.from_branch_id,
+        toBranchName: branchName.get(row.to_branch_id) ?? row.to_branch_id,
+        status: row.status,
+        note: row.note,
+        approvalNote: row.approval_note,
+        dispatchedAt: row.dispatched_at,
+        receivedAt: row.received_at,
+        lineCount: row.line_count,
+        // How many units are physically out on this document right now. Open = in transit; a
+        // received document has arrived (whatever is short stayed behind as a documented loss).
+        inTransitQuantity: row.status === 'dispatched' ? lines.reduce((s, l) => s + l.dispatched, 0) : 0,
+        shortageQuantity: lines.reduce((s, l) => s + l.shortage, 0),
+        lines,
+      };
+    });
   }
 
   /**

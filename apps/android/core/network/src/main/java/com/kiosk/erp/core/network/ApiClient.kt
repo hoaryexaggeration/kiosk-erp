@@ -144,6 +144,57 @@ data class ServerMovement(
     val wasConverted: Boolean get() = enteredUnit != null && enteredQuantity != null
 }
 
+/**
+ * A branch of this tenant (item 4.7) as `GET /v1/config/snapshot` reports it. The device caches
+ * these so the destination picker works with the network down — a transfer is a decision made at
+ * the shelf, and the shelf does not wait for a connection.
+ */
+data class ServerBranch(val id: String, val code: String, val name: String)
+
+/**
+ * One line of a cross-branch transfer (item 4.7) in the words the document was written in:
+ * `dispatched` is what left the source branch in base units, `enteredQuantity`/`enteredUnit` is how
+ * it was written on the paperwork, `received` is what the destination counted (null until it did),
+ * and `unitCostMinor` is the cost that travelled with the goods.
+ */
+data class ServerTransferLine(
+    val productId: String,
+    val sku: String,
+    val name: String,
+    val unit: String,
+    val enteredUnit: String?,
+    val enteredQuantity: Double?,
+    val dispatched: Double,
+    val received: Double?,
+    val unitCostMinor: Long,
+    val shortage: Double,
+)
+
+/**
+ * A cross-branch transfer document (item 4.7, ADR 0008): one document with two per-branch halves.
+ * The server only ever reports documents THIS branch is party to — what it sent and is waiting on,
+ * and what is coming to it.
+ */
+data class ServerTransfer(
+    val id: String,
+    val reference: String,
+    val fromBranchId: String,
+    val toBranchId: String,
+    val fromBranchName: String,
+    val toBranchName: String,
+    /** `dispatched` (waiting at the destination) | `received` | `discrepancy` (arrived short). */
+    val status: String,
+    val note: String?,
+    val approvalNote: String?,
+    val dispatchedAt: String,
+    val receivedAt: String?,
+    val lineCount: Int,
+    /** Units physically out on this document right now — 0 once it has arrived. */
+    val inTransitQuantity: Double,
+    val shortageQuantity: Double,
+    val lines: List<ServerTransferLine>,
+)
+
 /** One rejected row of a bulk import, pointing at the line the operator sees in their file. */
 data class ImportRowError(
     val line: Int,
@@ -569,8 +620,15 @@ class ApiClient {
         isActive = this["is_active"]?.jsonPrimitive?.content?.toBooleanStrictOrNull() ?: true,
     )
 
-    suspend fun inventoryBalances(baseUrl: String, token: String): List<ServerBalance> = withContext(Dispatchers.IO) {
-        val response = get(baseUrl, "inventory/balances?limit=500", token).jsonObject
+    /**
+     * Stock balances. With a branch stated, the response is that branch's shelf and nothing else
+     * (item 4.7): leaving it off merges every branch of the tenant into one projection, so two
+     * branches holding the same product would collapse into a single arbitrary number — the till
+     * must read the shelf it stands in front of (ADR 0008 item 5).
+     */
+    suspend fun inventoryBalances(baseUrl: String, token: String, branchId: String? = null): List<ServerBalance> = withContext(Dispatchers.IO) {
+        val query = if (branchId.isNullOrBlank()) "inventory/balances?limit=500" else "inventory/balances?limit=500&branchId=$branchId"
+        val response = get(baseUrl, query, token).jsonObject
         response["balances"]?.jsonArray?.map { element ->
             val obj = element.jsonObject
             ServerBalance(
@@ -579,6 +637,65 @@ class ApiClient {
                 sku = obj["sku"]?.jsonPrimitive?.content ?: "",
                 name = obj["name"]?.jsonPrimitive?.content ?: "",
                 quantity = obj["quantity"]?.jsonPrimitive?.content?.toDoubleOrNull() ?: 0.0,
+            )
+        } ?: emptyList()
+    }
+
+    /**
+     * Cross-branch transfers this branch is party to (item 4.7). The device must state which branch
+     * it is asking about, and the server checks that against this device's enrolment — a till reads
+     * its own branch's movements and nothing else (ADR 0008 item 5).
+     */
+    suspend fun inventoryTransfers(baseUrl: String, token: String, branchId: String): List<ServerTransfer> = withContext(Dispatchers.IO) {
+        val response = get(baseUrl, "inventory/transfers?branchId=$branchId&limit=500", token).jsonObject
+        response["transfers"]?.jsonArray?.map { element ->
+            val obj = element.jsonObject
+            ServerTransfer(
+                id = obj["id"]?.jsonPrimitive?.content ?: "",
+                reference = obj["reference"]?.jsonPrimitive?.content ?: "",
+                fromBranchId = obj["fromBranchId"]?.jsonPrimitive?.content ?: "",
+                toBranchId = obj["toBranchId"]?.jsonPrimitive?.content ?: "",
+                fromBranchName = obj["fromBranchName"]?.jsonPrimitive?.content ?: "",
+                toBranchName = obj["toBranchName"]?.jsonPrimitive?.content ?: "",
+                status = obj["status"]?.jsonPrimitive?.content ?: "dispatched",
+                note = obj["note"]?.jsonPrimitive?.contentOrNull,
+                approvalNote = obj["approvalNote"]?.jsonPrimitive?.contentOrNull,
+                dispatchedAt = obj["dispatchedAt"]?.jsonPrimitive?.content ?: "",
+                receivedAt = obj["receivedAt"]?.jsonPrimitive?.contentOrNull,
+                lineCount = obj["lineCount"]?.jsonPrimitive?.content?.toIntOrNull() ?: 0,
+                inTransitQuantity = obj["inTransitQuantity"]?.jsonPrimitive?.content?.toDoubleOrNull() ?: 0.0,
+                shortageQuantity = obj["shortageQuantity"]?.jsonPrimitive?.content?.toDoubleOrNull() ?: 0.0,
+                lines = obj["lines"]?.jsonArray?.map { lineElement ->
+                    val line = lineElement.jsonObject
+                    ServerTransferLine(
+                        productId = line["productId"]?.jsonPrimitive?.content ?: "",
+                        sku = line["sku"]?.jsonPrimitive?.content ?: "",
+                        name = line["name"]?.jsonPrimitive?.content ?: "",
+                        unit = line["unit"]?.jsonPrimitive?.content ?: "",
+                        enteredUnit = line["enteredUnit"]?.jsonPrimitive?.contentOrNull,
+                        enteredQuantity = line["enteredQuantity"]?.jsonPrimitive?.content?.toDoubleOrNull(),
+                        dispatched = line["dispatched"]?.jsonPrimitive?.content?.toDoubleOrNull() ?: 0.0,
+                        received = line["received"]?.jsonPrimitive?.content?.toDoubleOrNull(),
+                        unitCostMinor = line["unitCostMinor"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0L,
+                        shortage = line["shortage"]?.jsonPrimitive?.content?.toDoubleOrNull() ?: 0.0,
+                    )
+                } ?: emptyList(),
+            )
+        } ?: emptyList()
+    }
+
+    /**
+     * The tenant's branches (item 4.7), read from the same config snapshot the units and brands ride
+     * in — one small call that gives an offline-capable destination picker everything it needs.
+     */
+    suspend fun configBranches(baseUrl: String, token: String): List<ServerBranch> = withContext(Dispatchers.IO) {
+        val response = get(baseUrl, "config/snapshot", token).jsonObject
+        response["branches"]?.jsonArray?.map { element ->
+            val obj = element.jsonObject
+            ServerBranch(
+                id = obj["id"]?.jsonPrimitive?.content ?: "",
+                code = obj["code"]?.jsonPrimitive?.content ?: "",
+                name = obj["name"]?.jsonPrimitive?.content ?: "",
             )
         } ?: emptyList()
     }

@@ -1,7 +1,7 @@
 import { Body, Controller, Get, Post, Query, Req } from '@nestjs/common';
 import { AuthContext, AuthedRequest, CurrentAuth, RequirePermissions } from '../../common/auth-context';
 import { InventoryService } from './inventory.service';
-import { OpeningStockImportSchema } from './inventory.schema';
+import { OpeningStockImportSchema, TransfersQuerySchema } from './inventory.schema';
 
 @Controller('inventory')
 export class InventoryController {
@@ -39,6 +39,19 @@ export class InventoryController {
     @Query('limit') limit?: string,
   ) {
     return { movements: await this.inventory.movements(ctx.tenantId, productId, Number(limit ?? 200) || 200) };
+  }
+
+  /**
+   * Cross-branch transfers this branch is party to (item 4.7): what it sent and is waiting on, and
+   * what is waiting for it to count. There is deliberately no `POST` — a transfer is created and
+   * counted through `/v1/sync/push` as a `StockTransfer` command, because that is the only write
+   * path that queues offline and is idempotent under retry (§6).
+   */
+  @Get('transfers')
+  @RequirePermissions('inventory.transfer')
+  async transfers(@CurrentAuth() ctx: AuthContext, @Query() query: unknown) {
+    const { branchId, limit } = TransfersQuerySchema.parse(query);
+    return { transfers: await this.inventory.transfers(ctx.tenantId, branchId, ctx.deviceId, limit) };
   }
 
   /** Stock value per product, derived from the open FIFO valuation layers (ADR 0009). */

@@ -7,9 +7,13 @@ import com.kiosk.erp.core.common.Units
 import com.kiosk.erp.core.data.repository.InventoryRepository
 import com.kiosk.erp.core.data.repository.ProductRepository
 import com.kiosk.erp.core.data.session.SessionStore
+import com.kiosk.erp.core.database.BranchEntity
+import com.kiosk.erp.core.database.OutboxEntity
 import com.kiosk.erp.core.database.ProductConversionEntity
 import com.kiosk.erp.core.database.ProductEntity
 import com.kiosk.erp.core.database.StockBalanceEntity
+import com.kiosk.erp.core.database.StockTransferEntity
+import com.kiosk.erp.core.database.StockTransferLineEntity
 import com.kiosk.erp.core.network.ApiClient
 import com.kiosk.erp.core.network.ApiException
 import com.kiosk.erp.core.network.ImportSource
@@ -19,6 +23,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import java.util.UUID
@@ -50,6 +56,32 @@ data class OpeningImportState(
     val error: String? = null,
 )
 
+/**
+ * One cross-branch transfer as this device holds it (item 4.7): the document, its lines, and the
+ * most recent command this device has sent about it — null when nothing about it has been queued,
+ * pending while it waits for a connection, and a rejection when the server sent it back.
+ */
+data class TransferRow(
+    val transfer: StockTransferEntity,
+    val lines: List<StockTransferLineEntity>,
+    val command: OutboxEntity?,
+)
+
+/**
+ * A product's units physically out on documents THIS branch has sent (item 4.7). Shown under the
+ * stock rows because in-transit stock is stock the shelf cannot count but the shop still owns:
+ * gone from this branch's balance, not yet at the destination's.
+ */
+data class InTransitRow(
+    val productId: String,
+    val sku: String,
+    val name: String,
+    val unit: String,
+    val quantity: Double,
+    /** References of the documents carrying it; blanks mean queued on this device only. */
+    val references: List<String>,
+)
+
 class InventoryViewModel(
     private val inventoryRepository: InventoryRepository,
     private val productRepository: ProductRepository,
@@ -75,7 +107,7 @@ class InventoryViewModel(
                 _message.value = "Sign in first (Settings) to pull stock"
                 return@launch
             }
-            runCatching { api.inventoryBalances(session.apiBaseUrl, session.accessToken!!) }
+            runCatching { api.inventoryBalances(session.apiBaseUrl, session.accessToken!!, session.branchId) }
                 .onSuccess {
                     inventoryRepository.cacheBalances(it)
                     _message.value = "Refreshed ${it.size} balances from server"
@@ -84,14 +116,13 @@ class InventoryViewModel(
         }
     }
 
-    /** Queue an adjustment offline. Reason is required; the movement posts on the next sync. */
-    private val _adjustPacks = MutableStateFlow<List<ProductConversionEntity>>(emptyList())
-
     /**
-     * Pack sizes of the product the adjustment dialog is open on (item 4.6). Empty means the product
-     * has none — the dialog then offers its base unit only, the one unit the ledger actually holds.
+     * Pack sizes for the quantity dialog — adjustment (item 4.6) or transfer line (item 4.7). Empty
+     * means the product has none, and the dialog then offers its base unit only: the one unit the
+     * ledger actually holds.
      */
-    val adjustPacks: StateFlow<List<ProductConversionEntity>> = _adjustPacks.asStateFlow()
+    private val _packLookup = MutableStateFlow<List<ProductConversionEntity>>(emptyList())
+    val packLookup: StateFlow<List<ProductConversionEntity>> = _packLookup.asStateFlow()
 
     /**
      * Queue a stock adjustment in the unit the operator actually used (item 4.6).
@@ -138,13 +169,14 @@ class InventoryViewModel(
     }
 
     /**
-     * The pack sizes of the product being adjusted, read from Room so the dialog offers them while
-     * the shop is offline. Refreshed on every open rather than held, because a pack retired on the
-     * server must not be offered here either (item 4.6).
+     * The pack sizes of the product whose quantity is being written — an adjustment or a transfer
+     * line (items 4.6, 4.7) — read from Room so the dialog offers them while the shop is offline.
+     * Refreshed on every open rather than held, because a pack retired on the server must not be
+     * offered here either.
      */
-    fun beginAdjust(product: ProductEntity) {
+    fun loadPacks(product: ProductEntity) {
         viewModelScope.launch {
-            _adjustPacks.value = productRepository.conversions(product.id)
+            _packLookup.value = productRepository.conversions(product.id)
         }
     }
 
@@ -235,7 +267,7 @@ class InventoryViewModel(
                     if (commit && report.isValid) {
                         // The on-hand projection is the visible consequence of this import, so pull
                         // it now rather than leaving the operator looking at the pre-import numbers.
-                        runCatching { api.inventoryBalances(session.apiBaseUrl, token) }
+                        runCatching { api.inventoryBalances(session.apiBaseUrl, token, branchId) }
                             .onSuccess { inventoryRepository.cacheBalances(it) }
                         _openingImport.value = null
                         _message.value = if (report.alreadyApplied) {
@@ -301,6 +333,205 @@ class InventoryViewModel(
                         error = "Could not read history — this device shows history from the server. ${failure.message ?: ""}".trim(),
                     )
                 }
+        }
+    }
+
+    // --- cross-branch transfers (item 4.7, ADR 0008) ---------------------------------------------
+
+    private val _transfersOpen = MutableStateFlow(false)
+    val transfersOpen: StateFlow<Boolean> = _transfersOpen.asStateFlow()
+
+    /** This device's own branch — the line between "sent from here" and "coming to here". */
+    private val _ownBranchId = MutableStateFlow<String?>(null)
+    val ownBranchId: StateFlow<String?> = _ownBranchId.asStateFlow()
+
+    init {
+        viewModelScope.launch { _ownBranchId.value = sessionStore.current().branchId }
+    }
+
+    /** Branches to send to, cached so the picker works offline (item 4.7). */
+    val branches: StateFlow<List<BranchEntity>> = inventoryRepository.observeBranches()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    /** Every transfer document this branch is party to, with this device's own command state. */
+    val transferRows: StateFlow<List<TransferRow>> = combine(
+        inventoryRepository.observeTransfers(),
+        inventoryRepository.observeTransferLines(),
+        inventoryRepository.observeTransferCommands(),
+    ) { transfers, lines, commands ->
+        // The LATEST command per document: a corrected resubmission after a rejection is a new
+        // commandId, and the newest one is the state an operator is actually looking at.
+        val latest = commands
+            .groupBy { it.aggregateId }
+            .mapNotNull { (id, entries) -> entries.maxByOrNull { it.createdAtEpochMs }?.let { id to it } }
+            .toMap()
+        val byTransfer = lines.groupBy { it.transferId }
+        transfers.map { TransferRow(it, byTransfer[it.id].orEmpty(), latest[it.id]) }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    /**
+     * What is out on the road from this branch, per product (item 4.7). A document the server
+     * REFUSED never moved goods, so it does not count — a rejected dispatch with a still-warm local
+     * projection would otherwise put stock in transit that never left.
+     */
+    val inTransitRows: StateFlow<List<InTransitRow>> = combine(transferRows, _ownBranchId) { rows, branchId ->
+        if (branchId == null) return@combine emptyList<InTransitRow>()
+        val entries = rows
+            .filter { row ->
+                row.transfer.fromBranchId == branchId &&
+                    row.transfer.status == "dispatched" &&
+                    row.command?.status.let { it != "rejected" && it != "conflict" }
+            }
+            .flatMap { row -> row.lines.map { line -> row to line } }
+        entries
+            .groupBy({ it.second.productId }) { it }
+            .map { (productId, group) ->
+                val first = group.first().second
+                InTransitRow(
+                    productId = productId,
+                    sku = first.sku,
+                    name = first.name,
+                    unit = first.unit,
+                    quantity = group.sumOf { it.second.dispatched },
+                    references = group.map { it.first.transfer.reference }.distinct(),
+                )
+            }
+            .sortedBy { it.name }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    fun openTransfers() {
+        _transfersOpen.value = true
+        refreshTransfers()
+    }
+
+    fun closeTransfers() {
+        _transfersOpen.value = false
+    }
+
+    /**
+     * Catalogue search for the transfer line picker (§5 scanner/keyboard-first): name, SKU or
+     * barcode over the cached products, so a scan finds an item with the network down.
+     */
+    private val _lineMatches = MutableStateFlow<List<ProductEntity>>(emptyList())
+    val lineMatches: StateFlow<List<ProductEntity>> = _lineMatches.asStateFlow()
+
+    fun searchLines(query: String) {
+        viewModelScope.launch {
+            val needle = query.trim()
+            _lineMatches.value = if (needle.isEmpty()) emptyList() else productRepository.observeMatching(needle).first()
+        }
+    }
+
+    /** Resolve a typed or scanned code offline: an exact barcode first, then an exact SKU. */
+    suspend fun findProduct(code: String): ProductEntity? {
+        val needle = code.trim()
+        if (needle.isEmpty()) return null
+        return productRepository.findByBarcode(needle)
+            ?: products.value.firstOrNull { it.sku.equals(needle, ignoreCase = true) }
+    }
+
+    /** Pull this branch's documents and the destination list now instead of at the next sync. */
+    fun refreshTransfers() {
+        viewModelScope.launch {
+            val session = sessionStore.current()
+            val token = session.accessToken
+            val branchId = session.branchId
+            if (!session.isAuthenticated || token == null || branchId == null) {
+                _message.value = "Offline — this device has no session, so it is showing its cached transfers"
+                return@launch
+            }
+            runCatching {
+                inventoryRepository.cacheTransfers(api.inventoryTransfers(session.apiBaseUrl, token, branchId))
+                inventoryRepository.cacheBranches(api.configBranches(session.apiBaseUrl, token))
+            }.onFailure { failure ->
+                // A 403 is a role question, not a network one — saying "offline" about it would send
+                // the operator to look at a signal bar when the answer is who they signed in as.
+                _message.value = if ((failure as? ApiException)?.statusCode == 403) {
+                    "Cannot read transfers: your role does not have the inventory permission — ask the owner to sign you in with it (Settings shows who you are)"
+                } else {
+                    "Offline — showing this device's cached transfers (${failure.message ?: "no connection"})"
+                }
+            }
+        }
+    }
+
+    /**
+     * Queue a dispatch (item 4.7). The command carries what was typed — `2 crate` — and the server
+     * converts it, consumes the FIFO layers and issues the reference; this device records the
+     * intent and keeps its own on-hand projection honest until the next pull (§6).
+     */
+    fun dispatch(
+        toBranchId: String,
+        toBranchName: String,
+        lines: List<InventoryRepository.TransferLineDraft>,
+        note: String,
+        approvalNote: String,
+    ) {
+        viewModelScope.launch {
+            if (lines.isEmpty()) {
+                _message.value = "Cannot send: add at least one line"
+                return@launch
+            }
+            val session = sessionStore.current()
+            val branchId = session.branchId
+            val deviceId = session.deviceId
+            if (branchId == null || deviceId == null) {
+                _message.value = "Cannot send: this device is not enrolled against a branch — set it up in Settings"
+                return@launch
+            }
+            if (toBranchId == branchId) {
+                _message.value = "Cannot send: this branch cannot transfer to itself"
+                return@launch
+            }
+            val fromName = branches.value.firstOrNull { it.id == branchId }?.name ?: "this branch"
+            inventoryRepository.createTransfer(
+                lines = lines,
+                fromBranchId = branchId,
+                fromBranchName = fromName,
+                toBranchId = toBranchId,
+                toBranchName = toBranchName,
+                note = note.ifBlank { null },
+                approvalNote = approvalNote.ifBlank { null },
+                deviceId = deviceId,
+            )
+            _message.value = "Queued ${lines.size} line(s) to $toBranchName • waiting to sync"
+        }
+    }
+
+    /**
+     * Queue a receipt (item 4.7): what THIS branch counted, closing the document for both sides.
+     * Every dispatched line must be in `received` — the screen prefills them with what was sent —
+     * and a shortage must arrive with the supervisor note that explains it (§3.D), because the
+     * server refuses a short receipt without one.
+     */
+    fun receive(transfer: StockTransferEntity, received: Map<String, Double>, approvalNote: String) {
+        viewModelScope.launch {
+            val session = sessionStore.current()
+            val branchId = session.branchId
+            val deviceId = session.deviceId
+            if (branchId == null || deviceId == null) {
+                _message.value = "Cannot receive: this device is not enrolled against a branch — set it up in Settings"
+                return@launch
+            }
+            if (transfer.toBranchId != branchId) {
+                _message.value = "Cannot receive: ${transfer.reference.ifBlank { "this document" }} was sent to another branch"
+                return@launch
+            }
+            if (transfer.status != "dispatched") {
+                _message.value = "Cannot receive: this document has already been counted"
+                return@launch
+            }
+            if (inventoryRepository.hasQueuedReceipt(transfer.id)) {
+                _message.value = "Cannot receive: a receipt for ${transfer.reference.ifBlank { "this document" }} is already waiting to sync"
+                return@launch
+            }
+            inventoryRepository.receiveTransfer(
+                transfer = transfer,
+                received = received,
+                approvalNote = approvalNote.ifBlank { null },
+                deviceId = deviceId,
+            )
+            _message.value = "Queued the receipt for ${transfer.reference.ifBlank { "this document" }} • waiting to sync"
         }
     }
 }

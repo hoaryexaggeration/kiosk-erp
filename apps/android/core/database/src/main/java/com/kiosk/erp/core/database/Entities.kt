@@ -149,3 +149,68 @@ data class StockBalanceEntity(
     val updatedAtEpochMs: Long,
 )
 
+/**
+ * A branch of this tenant (item 4.7), cached so a transfer's destination can be picked with the
+ * network down. A SET like barcodes and pack sizes: replaced wholesale from the config snapshot, so
+ * a branch retired on the server stops being a destination here too.
+ */
+@Entity(tableName = "branches")
+data class BranchEntity(
+    @PrimaryKey val id: String,
+    val code: String,
+    val name: String,
+)
+
+/**
+ * A cross-branch transfer document (item 4.7, ADR 0008), cached for offline reading.
+ *
+ * `synced == false` means only this device has ever seen it — a dispatch queued on the shelf with
+ * no document number yet. `reference` is blank until the server issues `TRF-nnnn`, because a device
+ * must never invent a document number the server's tenant-wide series owns.
+ */
+@Entity(tableName = "stock_transfers")
+data class StockTransferEntity(
+    @PrimaryKey val id: String,
+    /** Blank while queued; `TRF-0001` once the server has issued it from the tenant series. */
+    val reference: String,
+    val fromBranchId: String,
+    val toBranchId: String,
+    val fromBranchName: String,
+    val toBranchName: String,
+    /** `dispatched` | `received` | `discrepancy` — the server's states, verbatim. */
+    val status: String,
+    val note: String?,
+    val approvalNote: String?,
+    val dispatchedAt: String,
+    val receivedAt: String?,
+    val lineCount: Int,
+    /** Units out on this document right now; 0 once it has arrived (whatever is short did not). */
+    val inTransitQuantity: Double,
+    val shortageQuantity: Double,
+    /** True once the server has reported this document, false while only this device holds it. */
+    val synced: Boolean,
+)
+
+/**
+ * One line of a transfer: what was sent, what arrived, and what the paperwork said the quantity was
+ * written in (item 4.6/4.7). `received` is null until the destination has counted it.
+ */
+@Entity(tableName = "stock_transfer_lines", primaryKeys = ["transferId", "productId"])
+data class StockTransferLineEntity(
+    val transferId: String,
+    val productId: String,
+    val sku: String,
+    val name: String,
+    /** The base unit stock is held in — the unit `dispatched` and `received` are counted in. */
+    val unit: String,
+    /** The pack it was written in, when a pack was used: "2 crate" for 48 ea. */
+    val enteredUnit: String?,
+    val enteredQuantity: Double?,
+    val dispatched: Double,
+    val received: Double?,
+    /** Cost per base unit that travelled with the goods (ADR 0009); 0 while still queued. */
+    val unitCostMinor: Long,
+    /** What the destination came up short — 0 until the document has been received. */
+    val shortage: Double,
+)
+

@@ -104,9 +104,21 @@ class SyncEngine(
                 runCatching { productRepository.refreshProducts(api.serverProducts(baseUrl, token)) }
             }
 
-            // Refresh the server-derived balance projection. A failure here must not fail the whole
-            // sync — sales/commands are the critical path, stock is a convenience cache.
-            runCatching { inventoryRepository.cacheBalances(api.inventoryBalances(baseUrl, token)) }
+            // Refresh the server-derived balance projection — for THIS device's branch, so a shop
+            // with two branches never sees one shelf's stock replace another's (item 4.7). A failure
+            // here must not fail the whole sync — sales/commands are the critical path, stock is a
+            // convenience cache.
+            runCatching { inventoryRepository.cacheBalances(api.inventoryBalances(baseUrl, token, session.branchId)) }
+
+            // Cross-branch transfers and the branches a destination is chosen from (item 4.7). Both
+            // are read models: a failed refresh must never fail a sync, and a device with no branch
+            // cannot say which transfers are its own, so it simply waits (§6).
+            runCatching {
+                session.branchId?.let { branchId ->
+                    inventoryRepository.cacheTransfers(api.inventoryTransfers(baseUrl, token, branchId))
+                }
+                inventoryRepository.cacheBranches(api.configBranches(baseUrl, token))
+            }
 
             val now = System.currentTimeMillis()
             db.syncStateDao().upsert(

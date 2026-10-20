@@ -5,13 +5,13 @@ Required by §15 "Mandatory Android APK delivery gate". Every field below is par
 | Field | Value |
 |---|---|
 | **Phase** | 4 — Catalogue, pricing/promotions and inventory (+ post-phase polish) |
-| **App version** | `0.4.6` (versionCode 406) |
-| **Artifact** | `artifacts/retail-erp-p04-v0.4.6.apk` |
-| **SHA-256** | `d75d408280de6bed4a9f44c495323584abfbfc28b096a5fbb5fa064d1b3fa3c6` |
-| **Size** | ~40.2 MB (bundled ML Kit barcode models, unminified debug build) |
+| **App version** | `0.4.7` (versionCode 407) |
+| **Artifact** | `artifacts/retail-erp-p04-v0.4.7.apk` |
+| **SHA-256** | `31764202b6a0a00ed72f9f13230a3f58cbf21045a90b64fca7e927f56b184291` |
+| **Size** | ~42.4 MB (42,362,041 bytes; bundled ML Kit barcode models, unminified debug build) |
 | **Signing** | **Stable internal-test key** (`CN=Kiosk ERP Internal Test`, cert SHA-256 `935c0fbc6993db9ca761b4c3610c71a50d91897fd9b1753d0da3e56dffd056dd`), generated once by `build-apk.sh` and git-ignored (ADR 0005) |
-| **Build** | Docker image `kiosk-erp-android-builder` (JDK 17 + Android SDK 34 + Gradle 8.7); `PHASE=04 VERSION=0.4.6 bash infra/docker/android/build-apk.sh` |
-| **Expected backend** | `apps/api` on `http://<host>:3000/v1` with migration `0005`; seed tenant/branch from `seed-dev.ts` (20-product demo catalogue with 9 units, 3 brands and 4 pack sizes — see `demo-catalogue.md`) |
+| **Build** | Docker image `kiosk-erp-android-builder` (JDK 17 + Android SDK 34 + Gradle 8.7); `PHASE=04 VERSION=0.4.7 bash infra/docker/android/build-apk.sh` |
+| **Expected backend** | `apps/api` on `http://<host>:3000/v1` with migration `0006`; seed tenant + **two** branches (Main Kiosk, and West Kiosk — item 4.7's second shelf) and a 20-product demo catalogue with 9 units, 3 brands and 4 pack sizes — see `demo-catalogue.md` |
 
 **Build history inside Phase 4** (each is signed with the same stable key, so each upgrades in place):
 
@@ -23,6 +23,7 @@ Required by §15 "Mandatory Android APK delivery gate". Every field below is par
 | `0.4.4` | 404 | `9e45a6a88b151008` | Scan-to-add made reliable (catalogue pulls itself on enrol/sync, paged fetch), scanner-first till, Products row on Home, 20-product demo catalogue |
 | `0.4.5` | 405 | `804f15d75709a7c8` | Opening-stock import (4.5): `POST /v1/inventory/opening-stock/import` + Stock → Opening stock screen (file picker or typed lines) |
 | `0.4.6` | 406 | `d75d408280de6bed` | Units of measure + pack sizes + brands (4.6): conversion at every ledger write, pack picker in the adjust dialog, Manage gains Units & Brands |
+| `0.4.7` | 407 | `31764202b6a0a00e` | Cross-branch transfers (4.7): dispatch/receipt documents, direction pills, send + count screens, in-transit under Stock rows, branch-scoped balances |
 
 > **Upgrade note.** Phase 3's APK was signed with the throwaway Android debug key, so it **cannot be
 > upgraded in place** by this build (signature mismatch) — uninstall the Phase 3 build first. This is
@@ -256,17 +257,80 @@ Device:
 - Documented in `docs/operations/units-and-conversions.md`, with the import columns in
   `catalogue-import-format.md` and `opening-stock-import.md`.
 
+Cross-branch stock transfers (`0.4.7`, item 4.7 / ADR 0008):
+
+- **Migration `0006`**: `stock_transfers` (unique `(tenant, reference)`, `from <> to` by CHECK, status
+  tied to `received_at`) and `stock_transfer_lines` (unique per document **and product**,
+  `quantity_dispatched > 0`, `quantity_received` NULL until counted, `unit_cost_minor` = the cost per
+  **base** unit that travelled with the goods), plus a partial unique index that makes
+  `numbering_series` tenant-wide for branch-less series so two branches cannot mint one `TRF-` number.
+- **One document, two per-branch steps.** `dispatched` → `received` | `discrepancy`: created *and*
+  dispatched in one command (no draft, no cancel), and **one receipt closes it entirely**. The
+  document id is device-chosen (so a dispatch works offline) while the reference is server-issued
+  from the tenant series (`TRF-0001`).
+- **Conservation, not bookkeeping.** A dispatch writes a *negative* movement at the source
+  (`reason: 'transfer_out'`, `costMode: 'transfer'` — FIFO allocations recorded, **no `cogs_minor`**:
+  the goods left, they were not sold) and stamps `unit_cost_minor = roundHalfUp(consumed /
+  dispatched)`, falling back to `products.cost_minor` when nothing was costed. A receipt writes a
+  *positive* movement at the destination (`reason: 'transfer_in'`) opening a layer at that same
+  carried cost. In transit belongs to **neither** branch — a test counts the shop's total stock across
+  every branch before and after both halves and finds it changed only by what was received short.
+- **Every line resolved before anything is written**, twice: `EMPTY_TRANSFER` when no line survives
+  the source, `UNKNOWN_TRANSFER` / `NOT_TRANSFER_DESTINATION` / `ALREADY_RECEIVED` /
+  `MISSING_RECEIPT_LINE` / `UNKNOWN_RECEIPT_LINE` / `RECEIVED_MORE_THAN_SENT` at the door. The stock
+  guard runs in base units per line (`INSUFFICIENT_STOCK` + conflict `NEGATIVE_STOCK`) and is lifted
+  only by an `approvalNote`; any shortage on a receipt needs one too (`OVERRIDE_REQUIRED` + conflict
+  `TRANSFER_SHORTAGE`) and lands as `review_required` + `discrepancy`. A shortage is recorded **on the
+  document only** — never a second movement.
+- **Branch discipline** (ADR 0008 item 5): `sync.pushOne` resolves the device's branch once per batch
+  and refuses any command claiming another (`BRANCH_MISMATCH`); `GET /v1/inventory/transfers` takes a
+  `branchId` checked against enrolment (403 on mismatch) and returns only documents the device's own
+  branch is source or destination of; a session with **no device** may read any branch of its tenant —
+  the consolidated cross-branch view is Phase 9's owner dashboard. Permission `inventory.transfer`
+  covers both halves and the list.
+- **Seed**: a second demo branch, **West Kiosk** (`22222222-2222-4222-8222-222222222223`), shipped
+  **empty** so one phone can send goods across a branch line and count them arriving — there is
+  deliberately no branch-creation endpoint yet.
+
+Device:
+
+- **Room v5** (`MIGRATION_4_5`, additive): `stock_transfers` (branch names, status, note, supervisor
+  note, timestamps, line/in-transit/shortage counts, a `synced` flag so only server-known documents may
+  be pruned), `stock_transfer_lines` (composite key), `branches` + their DAOs. Branches replace
+  wholesale on each snapshot, but an empty snapshot never erases the destination picker.
+- **Outbox**: `aggregateType: StockTransfer` where dispatch and receipt share the document's
+  `aggregateId`; each command writes the local document in the same transaction it queues in —
+  dispatch decrements the shelf (`synced = false`), receipt optimistically credits the destination —
+  so the screen never claims stock that has not moved even one byte toward the server.
+- **Stock → Cross-branch transfers**: direction pills (*Sent from here (n)* / *Coming here (n)*), a
+  summary banner with `Pending on this device (n)` and `Needs attention (n)`, and per document a card
+  carrying status in words, the other branch, every line with what was written (`2 crate`), what left,
+  what arrived, per-line shortage, the notes, and this device's sync state in words — `Queued — pending
+  on this device`, `Last synced …`, `Needs attention — INSUFFICIENT_STOCK` plus the server's sentence.
+- **Send stock** (source): destination picked from the cached branch list (works offline), lines found
+  by scan or IME search against Room, a quantity dialog offering the product's packs with the same
+  conversion preview the server posts with (`2 crate = 48 ea`), on-hand and *left after* per line, and
+  a **supervisor note that becomes required exactly when the dispatch would push the shelf below zero**
+  — the server's refusal asked for before the queue rather than after it.
+- **Count what arrived** (destination): every dispatched line prefilled with what was sent, over-count
+  blocked in place (*that belongs on a supplier receipt*), any shortage raising the required note.
+- **Stock rows** gained an *In transit from this branch* section naming the documents carrying what the
+  shelf can no longer count, and **balances are fetched for this device's branch**, so one shop with
+  two shelves never sees one branch's stock replace another's in the projection.
+- Documented in `docs/operations/stock-transfers.md`.
+
 ## Verification
 
 - `npm run verify` (fixtures + API tests): **74/74** domain-fixture checks (pricing, money parsing and
-  the unit-conversion vectors) and **127/127 API tests** across 12 suites — auth, catalog-import,
-  catalog-pricing, inventory, licensing, opening-stock-import, sync-sale, units-conversions, plus the
-  `product-import`, `opening-stock-import`, `unit-conversion` and `domain-fixtures` unit suites —
-  against Docker Postgres.
+  the unit-conversion vectors) and **145/145 API tests** across 13 suites — auth, catalog-import,
+  catalog-pricing, inventory, licensing, opening-stock-import, sync-sale, units-conversions,
+  **transfers (18: both halves end to end, the conservation and cost claims, every refusal, branch
+  scoping, numbering, idempotent replay)**, plus the `product-import`, `opening-stock-import`,
+  `unit-conversion` and `domain-fixtures` unit suites — against Docker Postgres.
 - `tsc -p tsconfig.build.json --noEmit`: clean.
 - `seed:dev` run twice against a freshly migrated database: **20 products / 18 barcodes / 9 units /
-  3 brands / 4 pack conversions / 18 opening movements** both times — the demo catalogue is still
-  idempotent, and the suites above run against it.
+  3 brands / 4 pack conversions / 18 opening movements / 2 branches** both times — the demo catalogue
+  is still idempotent, and the suites above run against it.
 - Docker APK build across **14** Gradle modules: clean, **zero Kotlin warnings**. Verified with a full
   `clean assembleDebug` run under `--no-build-cache`, so every module's Kotlin compile actually
   executed — a build-cache hit replays no output and would have hidden any warning.
@@ -281,7 +345,11 @@ Device:
 - Adjustments support a single line per command in the UI (the server accepts multi-line).
 - **Variants and supplier product codes are not built** (deferred rows D4d and D4c): a barcode resolves
   to exactly one product, and pack conversion is available but **quantity/unit entry on the till** is
-  still Phase 5.3 — today only the stock adjust dialog converts units.
+  still Phase 5.3 — today the stock adjust dialog and the transfer send/count screens convert units.
+- **Transfers are branch-to-branch documents on a till, not a network view** (ADR 0008 item 5): the
+  consolidated all-branch list, and the branch-creation UI that would give a real shop its second
+  shelf, both belong to later phases — the demo seed ships a second, empty branch (West Kiosk) so the
+  flow can be tested from one phone by re-entering the branch id in Settings.
 - **Costing is FIFO with valuation layers** (ADR 0009); full stocktake reconciliation and approvals
   (`approved_by` is populated by the negative-adjustment override flow) land with stocktake (4.8) and
   cash/shift approvals (Phase 6).
@@ -320,6 +388,12 @@ Device:
 | 23 | Stock → adjust `Soda 300ml`: choose **crate**, type `2` → preview reads `2 crate = 48 ea` and `→ 48 ea on hand after this is queued`; queue it, sync, then the movement history reads `2 crate → +48 ea` | ☐ |
 | 24 | Stock → adjust `Tomatoes` in `g`: `125 g` converts to `0.125 kg` and syncs; a whole-number `crate` count that lands on a fraction (e.g. `1.3 crate`) is blocked with the reason instead of being queued | ☐ |
 | 25 | Catalogue → **Manage**: add unit `bundle` (kind count) and brand `Test Brand`, then create a product picking both from the lists; `GET /v1/config/snapshot` carries them | ☐ |
+| 26 | Stock → **Cross-branch transfers**: pills read `Sent from here (0)` / `Coming here (0)`, the in-transit info banner explains where goods are counted, and **Send stock to another branch** is offered; opening it shows **West Kiosk** as the only destination | ☐ |
+| 27 | Send stock → West Kiosk, scan `6001000000087` (Soda 300ml), choose **crate** and type `2` → preview `2 crate = 48 ea` with *on hand 48, left 0* → dispatch while offline: the card says **Queued — pending on this device** with *queued on this device* instead of a number, Stock's *In transit from this branch* names it, and Soda's on-hand reads 0 | ☐ |
+| 28 | Reconnect → **Sync now**: the same card now reads `TRF-0001` and **Last synced …**; the document is under *Sent from here* and the server's `GET /v1/inventory/transfers?branchId=…` returns it with `inTransitQuantity: 48` | ☐ |
+| 29 | Send 1 more crate of Soda: because Main now holds 0, the **supervisor note becomes required** (button disabled until filled, banner says why); dispatch with the note → after sync the card reads **Needs attention — NEGATIVE_STOCK** with the server's sentence, while the goods never move twice | ☐ |
+| 30 | Settings → Branch id `22222222-2222-4222-8222-222222222223` → **Set up** (do this after syncing: a command queued at Main and pushed from a West-enrolled device must come back **Needs attention — BRANCH_MISMATCH**, never vanish) → the document moves to *Coming here* as **Waiting for your count** → **Count what arrived**, change 48 → 46 (a shortage raises the required note), try 50 (refused in place: *a surplus belongs on a supplier receipt*), queue with the note → after sync the card reads **Arrived short**, the line `counted 46 — 2 short` | ☐ |
+| 31 | After the receipt: West Kiosk's Stock shows the 46 it counted, Main's still shows 0 (the 48 it sent is in neither shelf until counted), Main's in-transit list is empty again, and switching Settings back to Main restores Main's view | ☐ |
 
 A failure involving lost transactions, duplicate posting, corrupted local data or a false
 payment/tax status blocks the phase.

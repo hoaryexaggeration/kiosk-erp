@@ -7,7 +7,7 @@ import { EventsService } from '../platform/events.service';
 import { AuthService } from '../auth/auth.service';
 import { SaleService } from '../sales/sale.service';
 import { InventoryService } from '../inventory/inventory.service';
-import { StockAdjustmentSchema, StockReceiptSchema } from '../inventory/inventory.schema';
+import { StockAdjustmentSchema, StockReceiptSchema, StockTransferSchema } from '../inventory/inventory.schema';
 import { CommandEnvelope, SalePayloadSchema } from './command.schema';
 import { AuthContext } from '../../common/auth-context';
 
@@ -27,6 +27,8 @@ const REQUIRED_PERMISSION: Record<string, string> = {
   Sale: 'pos.sale.create',
   StockReceipt: 'inventory.receive',
   StockAdjustment: 'inventory.adjust',
+  // A transfer moves stock a branch owns: both halves — the dispatch and the receipt — need it.
+  StockTransfer: 'inventory.transfer',
 };
 
 @Injectable()
@@ -44,20 +46,34 @@ export class SyncService {
   async push(ctx: AuthContext, correlationId: string, commands: CommandEnvelope[]): Promise<{ results: PushResult[] }> {
     // Resolve the actor's permissions once per batch; a device token is not proof of authority.
     const permissions = await this.auth.permissionsFor(ctx.userId);
+    // Which branch this session's device is enrolled against, once per batch. A command that names
+    // any other branch is refused: a till writes its own branch's ledger and nothing else, which is
+    // what makes "stock is in exactly one branch" a server-enforced property (ADR 0008 item 5).
+    // A session with no device — a desk operator, a test — has no branch to be locked to.
+    const deviceBranchId = ctx.deviceId ? await this.inventoryService.deviceBranch(ctx.tenantId, ctx.deviceId) : null;
     const results: PushResult[] = [];
     for (const command of commands) {
-      results.push(await this.pushOne(ctx, correlationId, command, permissions));
+      results.push(await this.pushOne(ctx, correlationId, command, permissions, deviceBranchId));
     }
     return { results };
   }
 
-  private async pushOne(ctx: AuthContext, correlationId: string, command: CommandEnvelope, permissions: string[]): Promise<PushResult> {
+  private async pushOne(
+    ctx: AuthContext,
+    correlationId: string,
+    command: CommandEnvelope,
+    permissions: string[],
+    deviceBranchId: string | null,
+  ): Promise<PushResult> {
     // Session scope is authoritative; the client cannot choose tenant/device identities.
     if (command.tenantId && command.tenantId !== ctx.tenantId) {
       return { commandId: command.commandId, status: 'rejected', code: SyncErrorCode.TENANT_MISMATCH, message: 'Command tenant does not match session' };
     }
     if (ctx.deviceId && command.deviceId !== ctx.deviceId) {
       return { commandId: command.commandId, status: 'rejected', code: 'DEVICE_MISMATCH', message: 'Command device does not match authenticated device' };
+    }
+    if (deviceBranchId && command.branchId !== deviceBranchId) {
+      return { commandId: command.commandId, status: 'rejected', code: 'BRANCH_MISMATCH', message: 'Command branch does not match the branch this device is enrolled against' };
     }
     if (command.schemaVersion > CURRENT_SCHEMA_VERSION) {
       return { commandId: command.commandId, status: 'rejected', code: SyncErrorCode.SCHEMA_UNSUPPORTED, message: `Server supports schemaVersion <= ${CURRENT_SCHEMA_VERSION}` };
@@ -177,6 +193,18 @@ export class SyncService {
         return { status: 'rejected', code: 'VALIDATION_ERROR', message: parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ') };
       }
       const applied = await this.inventoryService.adjustStock(trx, commandCtx, parsed.data);
+      return { status: applied.status, result: applied.result, code: applied.code, message: applied.message, conflictCodes: applied.conflictCodes };
+    }
+
+    // Cross-branch transfer (item 4.7): the same command runs `dispatch` or `receive` depending on
+    // its action, and whichever it is, it applies only to `command.branchId` — the branch this
+    // device is enrolled against, checked before dispatch (ADR 0008 item 5).
+    if (command.aggregateType === 'StockTransfer') {
+      const parsed = StockTransferSchema.safeParse(command.payload);
+      if (!parsed.success) {
+        return { status: 'rejected', code: 'VALIDATION_ERROR', message: parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ') };
+      }
+      const applied = await this.inventoryService.applyTransfer(trx, commandCtx, parsed.data);
       return { status: applied.status, result: applied.result, code: applied.code, message: applied.message, conflictCodes: applied.conflictCodes };
     }
 

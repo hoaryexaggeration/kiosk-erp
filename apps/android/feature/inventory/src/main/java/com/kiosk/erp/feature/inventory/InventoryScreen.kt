@@ -29,6 +29,7 @@ import androidx.compose.material.icons.filled.Inventory2
 import androidx.compose.material.icons.filled.PostAdd
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material.icons.filled.UploadFile
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -113,6 +114,12 @@ fun InventoryScreen(vm: InventoryViewModel, onOpenCatalogue: () -> Unit = {}) {
         return
     }
 
+    val transfersOpen by vm.transfersOpen.collectAsState()
+    if (transfersOpen) {
+        TransfersScreen(vm = vm, onBack = vm::closeTransfers)
+        return
+    }
+
     val opening = vm.openingImport.collectAsState().value
     if (opening != null) {
         OpeningStockScreen(state = opening, vm = vm, onPickFile = { filePicker.launch(OPENING_MIME_TYPES) })
@@ -122,6 +129,7 @@ fun InventoryScreen(vm: InventoryViewModel, onOpenCatalogue: () -> Unit = {}) {
     val balances by vm.balances.collectAsState()
     val products by vm.products.collectAsState()
     val message by vm.message.collectAsState()
+    val inTransit by vm.inTransitRows.collectAsState()
 
     var query by rememberSaveable { mutableStateOf("") }
     var adjusting by remember { mutableStateOf<ProductEntity?>(null) }
@@ -132,6 +140,11 @@ fun InventoryScreen(vm: InventoryViewModel, onOpenCatalogue: () -> Unit = {}) {
         val needle = query.trim()
         if (needle.isEmpty()) tracked
         else tracked.filter { it.name.contains(needle, ignoreCase = true) || it.sku.contains(needle, ignoreCase = true) }
+    }
+    val inTransitShown = remember(inTransit, query) {
+        val needle = query.trim()
+        if (needle.isEmpty()) inTransit
+        else inTransit.filter { it.name.contains(needle, ignoreCase = true) || it.sku.contains(needle, ignoreCase = true) }
     }
     val cachedAt = remember(balances) { balances.maxOfOrNull { it.updatedAtEpochMs } }
 
@@ -168,6 +181,14 @@ fun InventoryScreen(vm: InventoryViewModel, onOpenCatalogue: () -> Unit = {}) {
             subtitle = "Import opening balances for this branch — checked in full first, posted as movements, all or nothing",
             icon = Icons.Filled.PostAdd,
             onClick = vm::openOpeningImport,
+        )
+
+        Spacer(Modifier.height(StackGap))
+        NavRow(
+            title = "Cross-branch transfers",
+            subtitle = "Send stock to another branch and count what arrives — one document, two steps, queued offline",
+            icon = Icons.Filled.SwapHoriz,
+            onClick = vm::openTransfers,
         )
 
         Spacer(Modifier.height(StackGap))
@@ -217,6 +238,22 @@ fun InventoryScreen(vm: InventoryViewModel, onOpenCatalogue: () -> Unit = {}) {
                         onAdjust = { adjusting = product },
                     )
                 }
+                // Under the stock rows, what stock is NOT on this shelf but still belongs to the
+                // shop: sent on a document this branch is waiting to have counted (item 4.7).
+                if (inTransitShown.isNotEmpty()) {
+                    item(key = "in-transit-header") {
+                        Column {
+                            SectionTitle(
+                                "In transit from this branch",
+                                caption = "Left this branch's stock on a transfer and not yet counted at the destination — counted by the document, not by either shelf",
+                            )
+                            Spacer(Modifier.height(StackGap))
+                        }
+                    }
+                    items(inTransitShown, key = { "transit-${it.productId}" }) { row ->
+                        InTransitCard(row = row)
+                    }
+                }
             }
         }
     }
@@ -224,11 +261,11 @@ fun InventoryScreen(vm: InventoryViewModel, onOpenCatalogue: () -> Unit = {}) {
     adjusting?.let { product ->
         // The pack sizes are read from Room on every open, so the dialog offers exactly what this
         // product can currently be written in — online or not (item 4.6).
-        LaunchedEffect(product.id) { vm.beginAdjust(product) }
+        LaunchedEffect(product.id) { vm.loadPacks(product) }
         AdjustDialog(
             product = product,
             currentQuantity = quantityByProduct[product.id],
-            packs = vm.adjustPacks.collectAsState().value,
+            packs = vm.packLookup.collectAsState().value,
             onDismiss = { adjusting = null },
             onApply = { entered, unit, base, reason ->
                 vm.adjust(product, entered, unit, base, reason)
@@ -270,6 +307,44 @@ private fun StockRow(product: ProductEntity, quantity: Double?, onHistory: () ->
                 Icon(Icons.Filled.History, contentDescription = "Movement history for ${product.name}")
             }
             OutlinedButton(onClick = onAdjust, modifier = Modifier.heightIn(min = 40.dp)) { Text("Adjust") }
+        }
+    }
+}
+
+/**
+ * Stock this branch has sent but the destination has not counted yet (item 4.7). It is not on this
+ * shelf — the balance already dropped when the dispatch queued — and it is not at the destination
+ * either. It belongs to the document, so the card names the document(s) carrying it: `TRF-0001`,
+ * or "queued on this device" while no server number exists yet.
+ */
+@Composable
+private fun InTransitCard(row: InTransitRow) {
+    Card(Modifier.fillMaxWidth()) {
+        Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(
+                    row.name,
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    "${row.references.map { it.ifBlank { "queued on this device" } }.joinToString()} • ${row.sku}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Column(horizontalAlignment = Alignment.End, modifier = Modifier.padding(horizontal = 8.dp)) {
+                Text(
+                    "${Units.formatQuantity(row.quantity)} ${row.unit}",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = FontFamily.Monospace,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+                Text("in transit", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
         }
     }
 }
@@ -414,7 +489,7 @@ private fun AdjustDialog(
  * Why a conversion could not be done, in the words an operator can act on — the stable code stays
  * in the log, the sentence goes on screen (item 4.6).
  */
-private fun conversionProblem(code: String, unit: String, baseUnit: String): String = when (code) {
+internal fun conversionProblem(code: String, unit: String, baseUnit: String): String = when (code) {
     "FRACTIONAL_QUANTITY" -> "$baseUnit is counted, so this has to come out as whole $baseUnit — the server would refuse it too"
     "UNKNOWN_CONVERSION" -> "This product has no $unit pack size saved, so it can only be adjusted in $baseUnit"
     "UNKNOWN_UNIT_KIND" -> "The unit list has not reached this device yet, so this pack cannot be checked — enter the change in $baseUnit"
@@ -520,7 +595,7 @@ private fun formatSignedQuantity(quantity: Double): String {
 }
 
 /** Server timestamps are ISO-8601; fall back to the raw string rather than dropping the row. */
-private fun formatWhen(iso: String): String {
+internal fun formatWhen(iso: String): String {
     if (iso.isBlank()) return "—"
     return runCatching {
         java.time.OffsetDateTime.parse(iso)

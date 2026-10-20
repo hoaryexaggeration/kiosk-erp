@@ -27,7 +27,7 @@ Status key: ✅ present · 🟡 partial · ❌ absent.
 | 1 | Domain contracts, data model, sync spec | 🟡 | Fixtures, sync protocol, posting matrix, ADRs, UoM/pack-size contract (`units-and-conversions.md`) exist; **no OpenAPI skeleton, no ERD, no state machines beyond `Sale`, no event-version policy** |
 | 2 | Backend foundation and cloud controls | 🟡 | NestJS + Postgres + auth/RBAC + devices + licensing + outbox work; **no CI, no staging deploy, no backups/restore drill, no OpenAPI generation, no rate limits, `LicenseBillingModule` absent** |
 | 3 | Native shell, local DB, sync center | 🟡 | Shell, Room, push/pull, Sync Center, enrolment work; **`LicenseManager` request export (`.licreq`/QR), entitlement display, Keystore installation key, replay/rollback detection, app lock/offline expiry absent** |
-| 4 | Catalogue, pricing, inventory ledger | 🟡 | Products/barcodes/tax/categories/promotions + movement ledger + balances work; product CRUD UI, category/units/brands/tax management, bulk import, opening-stock import and movement history UI all in; units + pack conversions + brands now hold one base-unit ledger; **no price lists/scheduled prices, no transfers, no stocktake, no low-stock thresholds, no variants, no supplier product codes** |
+| 4 | Catalogue, pricing, inventory ledger | 🟡 | Products/barcodes/tax/categories/promotions + movement ledger + balances work; product CRUD UI, category/units/brands/tax management, bulk import, opening-stock import and movement history UI all in; units + pack conversions + brands now hold one base-unit ledger; cross-branch transfers (dispatch/receipt/discrepancy) now move goods under one document; **no price lists/scheduled prices, no stocktake, no low-stock thresholds, no variants, no supplier product codes** |
 | 5 | Offline POS vertical slice | 🟡 | Search, scan, cart, offline cash sale, outbox, idempotent posting work; **no cashier session/role gate, no discounts UI, no price override, no customer on sale, no split tender, no hold/resume, no void, no receipt rendering/printing, no sales-history screen** |
 | 6 | Cash, shifts, refunds, end-of-day | ❌ | `cash_sessions`/`cash_movements` tables only; no float, count, variance, approval, shift close, returns/refunds/exchange |
 | 7 | Customers, suppliers, debtors, creditors | ❌ | `customers`/`suppliers`/`customer_ledger_entries` tables only; no modules, no UI, no credit policy |
@@ -119,7 +119,7 @@ must be completed when its target phase is reached.
 | D4c | Supplier product codes on the catalogue — needs the Supplier module, so it lands with it | §3.C | 7 | ☐ |
 | D4d | Product **variants** (size/flavour/colour as distinct sellable items) — needs its own exit criterion agreed **before Phase 5 starts**, because variants change what the till resolves a barcode to | §3.C | 4 (before Ph5) | ☐ |
 | D5 | Price lists, branch/customer/scheduled prices, price-change history | §3.C | 4 | ☐ |
-| D6 | Stock transfers with dispatch/receipt states | §3.D, §15 Ph4 | 4 | ☐ |
+| D6 | Stock transfers with dispatch/receipt states | §3.D, §15 Ph4 | 4 ✔ | ✔ |
 | D7 | Stocktake / cycle count | §3.D, §15 Ph4 | 4 | ☐ |
 | D7a | Stock valuation is **FIFO with valuation layers** (ADR 0009), replacing weighted average | §7, §18.5 | 4 ✔ | ✔ |
 | D7b | Till blocks a sale that would take stock negative; `UNCOSTED_STOCK` resolution path | §18.5 | 5 | ☐ |
@@ -167,7 +167,7 @@ each later phase is expanded to the same granularity as it becomes current.
 | 4.4 ✔ | Bulk import: CSV/JSON upload → **preview → validation → per-row error report → commit** (D2) | Done: `POST /v1/products/import` (preview/commit share one planner, all-or-nothing) + device file picker with the server-validated preview; 18 unit + 8 endpoint tests |
 | 4.5 ✔ | Opening stock import (D3) | Done: `POST /v1/inventory/opening-stock/import` — preview/commit share one pure planner, all-or-nothing, report carries `onHandBefore/After` + three warnings; commit appends `opening_stock` movements that open FIFO layers; `requestId` makes a retried commit idempotent; Stock tab gains an Opening stock screen (file picker or typed lines); 16 unit + 11 endpoint tests |
 | 4.6 ✔ | Units of measure + pack conversions + brands (D4a, D4b) | Done: `units_of_measure` (`kind` = count/weight/volume — the rule, not a label), product-scoped `unit_conversions` as a SET (factor = base units per 1 of the pack), `brands` + `products.brand_id`; `InventoryService.resolveQuantity` is the single conversion point, so a movement is always recorded in `products.unit` and remembers `entered_unit`/`entered_quantity`; receipts, adjustments and opening import all convert, quoted costs divide to cost-per-base, overrides are measured in base; `unit_kind` rides the product payload so a device converts offline; device: Room v4 (brand, conversions, unitKind), product editor pack sizes + brand + unit picker, Manage gains Units & Brands, stock adjust dialog picks a pack and previews `10 crate = 240 ea` with the server's own reference implementation, history shows `10 crate → +240 ea`; 74/74 fixtures + 127/127 API tests; `units-and-conversions.md` |
-| 4.7 | Cross-branch stock transfers with dispatch/receipt/discrepancy states (D6, ADR 0008) | Stock is in exactly one branch or in transit, never both |
+| 4.7 ✔ | Cross-branch stock transfers with dispatch/receipt/discrepancy states (D6, ADR 0008) | Done: stock is in exactly one branch or in transit, never both — `stock_transfers` + `stock_transfer_lines` (one document, two per-branch steps, `from <> to` and status↔`received_at` by CHECK, `UNIQUE (tenant, reference)`); dispatch consumes the source's FIFO layers (`costMode: 'transfer'` — allocations, no COGS) and stamps a carried cost per base unit on each line, the receipt opens the destination's layer at that same cost; in transit belongs to **neither** branch; shortages stay on the document as `discrepancy` and need a supervisor note, over-receipt refused; `TRF-0001` from a tenant-wide series; `inventory.transfer` + branch-scoped list (ADR 0008 item 5, pushOne `BRANCH_MISMATCH`); device: Room v5 (transfers + lines + branches), outbox `StockTransfer` commands, direction pills, send/count screens, in-transit under Stock rows; 74/74 fixtures + 145/145 API tests; `stock-transfers.md` |
 | 4.8 | Stocktake / cycle count (D7) | A count produces adjustment movements with reason and actor |
 | 4.9 | Low-stock thresholds and alerts (D8) | Threshold breach is visible on the Stock screen |
 | 4.10 ✔ | Movement history UI per product/location (D8) | Done: per-product history in the Stock tab (source, signed quantity, reason, date, COGS); reads the server ledger |
@@ -314,6 +314,54 @@ for water), so pack sizes are product-scoped rows, not unit rows.
   an exit criterion before Phase 5 starts.
 - Documented in `docs/operations/units-and-conversions.md`; 20 tests in `units-conversions.spec.ts`
   plus import and planner cases for the new columns.
+
+#### Cross-branch stock transfers (v0.4.7, item 4.7)
+
+The exit criterion is a conservation rule: **at no instant is the same stock counted in two
+branches.** One document, two per-branch steps — the source dispatches, the destination receives,
+and between those moments the goods belong to neither shelf but to the document.
+
+- **Ledger facts only, branch-local.** A dispatch writes a *negative* movement at the source
+  (`reason: 'transfer_out'`, `costMode: 'transfer'` — FIFO allocations recorded, **no `cogs_minor`:
+  goods that left the shelves were not sold) and a receipt writes a *positive* one at the
+  destination (`reason: 'transfer_in'`) opening a layer at the **carried cost** stamped on the line,
+  so the two sides can never value the same goods differently. The device never computes either
+  number's authority: it sends what was typed (`2 crate`), `applyMovement` converts once, and the
+  document line stores `|baseQuantity|` while the movement remembers the signed entered pair
+  (`entered_quantity = -2`).
+- **The cost travels with the goods.** `unit_cost_minor = roundHalfUp(consumed / dispatched)`,
+  falling back to `products.cost_minor` when nothing was costed — a branch must never hand goods
+  over valued at nothing, and the fallback is the rule a receipt already follows (ADR 0009).
+- **Owner decisions, built as agreed.** Every shortage needs a supervisor note (mirrors the negative
+  adjustment override — refused *before* anything is written, so nothing half-applies); receiving
+  more than was sent is refused with `RECEIVED_MORE_THAN_SENT` pointing at a supplier receipt; and a
+  till lists only the documents its own branch is party to — the consolidated cross-branch view is
+  Phase 9's owner dashboard (ADR 0008 item 5), no new permission invented for it.
+- **Whole or not at all, twice.** Every line is resolved before the document is written
+  (`EMPTY_TRANSFER` when none survive), the stock guard runs per line in base units
+  (`INSUFFICIENT_STOCK`/`NEGATIVE_STOCK`, lifted by `approvalNote`), and a receipt must name every
+  dispatched line and invent none (`MISSING_RECEIPT_LINE` / `UNKNOWN_RECEIPT_LINE`). A shortage is
+  recorded **on the document only** — never a second movement, since those units already left.
+- **Branch discipline is enforced at both doors.** `sync.pushOne` resolves the device's branch once
+  per batch (`BRANCH_MISMATCH` for any command claiming another), and the list query's `branchId`
+  is checked against enrolment too; a desk session with no device may read any branch of its own
+  tenant (Phase 9 stands on this).
+- **Numbering is server-owned.** `TRF-0001` from a tenant-wide series (`branch_id IS NULL`, made
+  unique by a partial index so two branches cannot mint the same number), allocated under the row
+  lock — a device that dispatched offline holds a document id but never a reference, and the screen
+  says *queued on this device* until the server issues one.
+- **Device**: Room v5 (`stock_transfers`, `stock_transfer_lines`, `branches`, `MIGRATION_4_5`), outbox
+  commands with `aggregateType: StockTransfer` where dispatch and receipt share the document's
+  `aggregateId`, and the transfer list refreshed after push+pull like the balance projection (a
+  failed refresh never fails a sync). Screen: Stock → *Cross-branch transfers* with direction pills,
+  per-row sync state **in words** (`Queued — pending on this device`, `Last synced …`,
+  `Needs attention — <code>`), send-from-here with the pack conversion preview and a supervisor note
+  that becomes required exactly when the server would refuse, count-what-arrived with every line
+  prefilled and over-count blocked in place, and an *In transit from this branch* section under the
+  stock rows naming the documents carrying what the shelf cannot count.
+- Documented in `docs/operations/stock-transfers.md`; 18 endpoint tests in `transfers.spec.ts`
+  (both halves end to end, the conservation and cost claims, every refusal, branch scoping,
+  numbering, idempotent replay).
 
 ### Phase 5 — Offline POS vertical slice (current phase)
 

@@ -22,8 +22,11 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         OutboxEntity::class,
         SyncStateEntity::class,
         StockBalanceEntity::class,
+        StockTransferEntity::class,
+        StockTransferLineEntity::class,
+        BranchEntity::class,
     ],
-    version = 4,
+    version = 5,
     exportSchema = false,
 )
 abstract class KioskDatabase : RoomDatabase() {
@@ -32,6 +35,8 @@ abstract class KioskDatabase : RoomDatabase() {
     abstract fun outboxDao(): OutboxDao
     abstract fun syncStateDao(): SyncStateDao
     abstract fun inventoryDao(): InventoryDao
+    abstract fun transferDao(): TransferDao
+    abstract fun branchDao(): BranchDao
 
     companion object {
         /**
@@ -56,7 +61,7 @@ abstract class KioskDatabase : RoomDatabase() {
 
         fun build(context: Context): KioskDatabase =
             Room.databaseBuilder(context, KioskDatabase::class.java, "kiosk-erp.db")
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
                 .fallbackToDestructiveMigrationOnDowngrade()
                 .build()
 
@@ -91,6 +96,58 @@ abstract class KioskDatabase : RoomDatabase() {
                         "`unit` TEXT NOT NULL, " +
                         "`factor` REAL NOT NULL, " +
                         "PRIMARY KEY(`productId`, `unit`))",
+                )
+            }
+        }
+
+        /**
+         * v4 → v5 (item 4.7): cross-branch transfers and the branch list a transfer's destination is
+         * picked from. All three tables are new, so nothing existing moves — a device upgrading with
+         * queued sales or unsynced adjustments in the outbox keeps them, and its first transfer list
+         * arrives as an empty cache rather than a fabricated one.
+         */
+        val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `branches` (" +
+                        "`id` TEXT NOT NULL, " +
+                        "`code` TEXT NOT NULL, " +
+                        "`name` TEXT NOT NULL, " +
+                        "PRIMARY KEY(`id`))",
+                )
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `stock_transfers` (" +
+                        "`id` TEXT NOT NULL, " +
+                        "`reference` TEXT NOT NULL, " +
+                        "`fromBranchId` TEXT NOT NULL, " +
+                        "`toBranchId` TEXT NOT NULL, " +
+                        "`fromBranchName` TEXT NOT NULL, " +
+                        "`toBranchName` TEXT NOT NULL, " +
+                        "`status` TEXT NOT NULL, " +
+                        "`note` TEXT, " +
+                        "`approvalNote` TEXT, " +
+                        "`dispatchedAt` TEXT NOT NULL, " +
+                        "`receivedAt` TEXT, " +
+                        "`lineCount` INTEGER NOT NULL, " +
+                        "`inTransitQuantity` REAL NOT NULL, " +
+                        "`shortageQuantity` REAL NOT NULL, " +
+                        "`synced` INTEGER NOT NULL, " +
+                        "PRIMARY KEY(`id`))",
+                )
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `stock_transfer_lines` (" +
+                        "`transferId` TEXT NOT NULL, " +
+                        "`productId` TEXT NOT NULL, " +
+                        "`sku` TEXT NOT NULL, " +
+                        "`name` TEXT NOT NULL, " +
+                        "`unit` TEXT NOT NULL, " +
+                        "`enteredUnit` TEXT, " +
+                        "`enteredQuantity` REAL, " +
+                        "`dispatched` REAL NOT NULL, " +
+                        "`received` REAL, " +
+                        "`unitCostMinor` INTEGER NOT NULL, " +
+                        "`shortage` REAL NOT NULL, " +
+                        "PRIMARY KEY(`transferId`, `productId`))",
                 )
             }
         }

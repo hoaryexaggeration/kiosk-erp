@@ -125,6 +125,24 @@ interface OutboxDao {
     @Query("SELECT * FROM outbox WHERE status IN ('rejected','conflict','review_required') ORDER BY createdAtEpochMs DESC")
     fun observeNeedsAttention(): Flow<List<OutboxEntity>>
 
+    /**
+     * Every command of one aggregate type, newest first — how the transfers list joins a document to
+     * what this device has most recently told the server about it (queued, accepted, needs attention).
+     */
+    @Query("SELECT * FROM outbox WHERE aggregateType = :aggregateType ORDER BY createdAtEpochMs DESC")
+    fun observeForType(aggregateType: String): Flow<List<OutboxEntity>>
+
+    /**
+     * How many commands for this one document are still waiting to post. A receipt that is already
+     * queued must not be queued again — the second would post as a duplicate and come back as a
+     * rejection nobody asked for.
+     */
+    @Query(
+        "SELECT COUNT(*) FROM outbox WHERE aggregateType = :aggregateType AND aggregateId = :aggregateId " +
+            "AND status IN ('pending','retryable')",
+    )
+    suspend fun pendingReceiptCount(aggregateType: String, aggregateId: String): Int
+
     @Query("SELECT MIN(createdAtEpochMs) FROM outbox WHERE status = 'pending'")
     fun observeOldestPendingEpochMs(): Flow<Long?>
 
@@ -160,4 +178,61 @@ interface InventoryDao {
 
     @Query("DELETE FROM stock_balances")
     suspend fun clear()
+}
+
+/**
+ * Cross-branch transfers (item 4.7), cached so what is in transit is readable offline — "what did
+ * we send, what is coming to us" is a shelf question, asked with the network down as often as up.
+ */
+@Dao
+interface TransferDao {
+    /** Newest first: the newest thing anyone did with a document is what an operator needs first. */
+    @Query("SELECT * FROM stock_transfers ORDER BY dispatchedAt DESC")
+    fun observeTransfers(): Flow<List<StockTransferEntity>>
+
+    @Query("SELECT * FROM stock_transfers WHERE id = :id")
+    suspend fun byId(id: String): StockTransferEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertTransfers(transfers: List<StockTransferEntity>)
+
+    /**
+     * Only documents this device has been TOLD about are removed when they vanish from the server's
+     * list. A dispatch queued at the shelf with no connection yet has no server row to be reported
+     * against, and deleting it would delete work nobody has seen (§1.6 rule 2).
+     */
+    @Query("DELETE FROM stock_transfers WHERE synced = 1 AND id NOT IN (:ids)")
+    suspend fun pruneSyncedExcept(ids: List<String>)
+
+    @Query("DELETE FROM stock_transfers WHERE synced = 1")
+    suspend fun clearSynced()
+
+    @Query("SELECT * FROM stock_transfer_lines")
+    fun observeLines(): Flow<List<StockTransferLineEntity>>
+
+    @Query("SELECT * FROM stock_transfer_lines WHERE transferId = :transferId")
+    suspend fun linesFor(transferId: String): List<StockTransferLineEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertLines(lines: List<StockTransferLineEntity>)
+
+    /** Lines whose document is gone would linger forever otherwise — they carry no meaning alone. */
+    @Query("DELETE FROM stock_transfer_lines WHERE transferId NOT IN (SELECT id FROM stock_transfers)")
+    suspend fun pruneOrphanLines()
+}
+
+/** The tenant's branches, replaced wholesale from the config snapshot (item 4.7). */
+@Dao
+interface BranchDao {
+    @Query("SELECT * FROM branches ORDER BY name ASC")
+    fun observeAll(): Flow<List<BranchEntity>>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertAll(branches: List<BranchEntity>)
+
+    @Query("DELETE FROM branches WHERE id NOT IN (:ids)")
+    suspend fun pruneExcept(ids: List<String>)
+
+    @Query("SELECT COUNT(*) FROM branches")
+    suspend fun count(): Int
 }

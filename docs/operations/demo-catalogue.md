@@ -15,6 +15,7 @@ awkward rows that exist to prove a rule.
 | Owner | `owner@kiosk.test` / `demo1234` |
 | Cashier | `cashier@kiosk.test` / `demo1234` |
 | Branch | `22222222-2222-4222-8222-222222222222` (MAIN · Main Kiosk) |
+| Second branch | `22222222-2222-4222-8222-222222222223` (WEST · West Kiosk) — seeded **empty**, so one phone can send goods across a branch line and count them arriving (item 4.7) |
 | Store location | `99999999-9999-4999-8999-999999999991` (Store) |
 
 **Getting it onto a device.** Settings → fill in the address, email, password, branch and device id

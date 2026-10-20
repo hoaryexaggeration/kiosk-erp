@@ -266,6 +266,40 @@ export interface InventoryCostAllocationsTable {
   amount_minor: number;
   created_at: Generated<Date>;
 }
+/**
+ * A cross-branch stock transfer (item 4.7, ADR 0008): written by the source branch when it
+ * dispatches and by the destination branch when it receives, and never by anyone else.
+ */
+export interface StockTransfersTable {
+  id: string;
+  tenant_id: string;
+  reference: string;
+  from_branch_id: string;
+  to_branch_id: string;
+  status: 'dispatched' | 'received' | 'discrepancy';
+  note: string | null;
+  dispatched_by: string | null;
+  dispatched_at: Generated<Date>;
+  received_by: string | null;
+  received_at: Date | null;
+  approved_by: string | null;
+  approval_note: string | null;
+  line_count: number;
+  created_at: Generated<Date>;
+}
+export interface StockTransferLinesTable {
+  id: string;
+  tenant_id: string;
+  transfer_id: string;
+  product_id: string;
+  unit: string;
+  entered_unit: string | null;
+  entered_quantity: number | null;
+  quantity_dispatched: number;
+  /** NULL until the destination counts it; 0 means "none of this line arrived". */
+  quantity_received: number | null;
+  unit_cost_minor: number;
+}
 export interface CashSessionsTable {
   id: string;
   tenant_id: string;
@@ -545,6 +579,8 @@ export interface Database {
   stock_balances: StockBalancesTable;
   inventory_valuation_layers: InventoryValuationLayersTable;
   inventory_cost_allocations: InventoryCostAllocationsTable;
+  stock_transfers: StockTransfersTable;
+  stock_transfer_lines: StockTransferLinesTable;
   cash_sessions: CashSessionsTable;
   cash_movements: CashMovementsTable;
   sales: SalesTable;
