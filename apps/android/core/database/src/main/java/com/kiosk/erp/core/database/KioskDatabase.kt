@@ -26,7 +26,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         StockTransferLineEntity::class,
         BranchEntity::class,
     ],
-    version = 5,
+    version = 6,
     exportSchema = false,
 )
 abstract class KioskDatabase : RoomDatabase() {
@@ -61,7 +61,7 @@ abstract class KioskDatabase : RoomDatabase() {
 
         fun build(context: Context): KioskDatabase =
             Room.databaseBuilder(context, KioskDatabase::class.java, "kiosk-erp.db")
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
                 .fallbackToDestructiveMigrationOnDowngrade()
                 .build()
 
@@ -149,6 +149,16 @@ abstract class KioskDatabase : RoomDatabase() {
                         "`shortage` REAL NOT NULL, " +
                         "PRIMARY KEY(`transferId`, `productId`))",
                 )
+            }
+        }
+
+        /**
+         * v5 → v6 carries the low-stock threshold (item 4.9) on the cached product, so the Stock
+         * screen can flag a breached shelf from its own cache while the phone is offline.
+         */
+        val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `products` ADD COLUMN `reorderPoint` REAL")
             }
         }
     }

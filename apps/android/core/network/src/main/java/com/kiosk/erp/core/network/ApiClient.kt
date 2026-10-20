@@ -67,6 +67,8 @@ data class ServerProduct(
      * a pack conversion needs the rule its base unit implies, offline (item 4.6).
      */
     val unitKind: String? = null,
+    /** Low-stock threshold in base units (item 4.9); null = nobody is watching this line. */
+    val reorderPoint: Double? = null,
     /** The full set the server reports for this product — replaced into the cache as a SET. */
     val conversions: List<ServerConversion> = emptyList(),
     val isStockTracked: Boolean = true,
@@ -103,6 +105,8 @@ data class ProductDraft(
     val unit: String = "ea",
     val priceMinor: Long = 0,
     val costMinor: Long = 0,
+    /** Low-stock threshold in base units, or null for "no alert configured" (item 4.9). */
+    val reorderPoint: Double? = null,
     val isStockTracked: Boolean = true,
     val isActive: Boolean = true,
     val barcodes: List<String> = emptyList(),
@@ -570,6 +574,9 @@ class ApiClient {
         put("unit", draft.unit)
         put("priceMinor", draft.priceMinor)
         put("costMinor", draft.costMinor)
+        // Sent on create AND update because the two meanings meet here: null is "no threshold" on
+        // a new product and "clear it" on an edit — clearing must be a value, never an absence.
+        put("reorderPoint", draft.reorderPoint)
         put("isStockTracked", draft.isStockTracked)
         put("barcodes", JsonArray(draft.barcodes.map { JsonPrimitive(it) }))
         put(
@@ -613,6 +620,8 @@ class ApiClient {
         brandId = this["brand_id"]?.jsonPrimitive?.contentOrNull,
         brandName = this["brand_name"]?.jsonPrimitive?.contentOrNull,
         unitKind = this["unit_kind"]?.jsonPrimitive?.contentOrNull,
+        // JSON null and a missing key both mean "no threshold" — contentOrNull swallows JsonNull.
+        reorderPoint = this["reorder_point"]?.jsonPrimitive?.contentOrNull?.toDoubleOrNull(),
         conversions = this["conversions"]?.jsonArray?.mapNotNull { element ->
             val conversion = element.jsonObject
             val unit = conversion["unit"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null

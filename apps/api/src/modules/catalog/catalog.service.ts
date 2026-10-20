@@ -35,6 +35,8 @@ export interface CreateProductInput {
   isStockTracked?: boolean;
   priceMinor?: number;
   costMinor?: number;
+  /** Low-stock threshold in base units (item 4.9); null or absent means "no alert configured". */
+  reorderPoint?: number | null;
   barcodes?: string[];
   /** The full desired conversion set; absent means "leave the stored set alone". */
   conversions?: ProductConversion[];
@@ -53,6 +55,8 @@ export interface UpdateProductInput {
   isActive?: boolean;
   priceMinor?: number;
   costMinor?: number;
+  /** Low-stock threshold: null clears it, absent keeps the stored value (item 4.9). */
+  reorderPoint?: number | null;
   /**
    * The full desired barcode set. When present the server replaces this product's barcodes with
    * exactly these values, so a barcode can be added or removed after the product exists — a new
@@ -88,6 +92,7 @@ export class CatalogService {
         'products.unit',
         'products.price_minor',
         'products.cost_minor',
+        'products.reorder_point',
         'products.is_stock_tracked',
         'products.is_active',
         'products.version',
@@ -119,6 +124,9 @@ export class CatalogService {
       unit_kind: unitKind,
       price_minor: Number(row.price_minor),
       cost_minor: Number(row.cost_minor),
+      // The threshold ships with the product (item 4.9): the device's Stock screen computes the
+      // breach from cached balances while the shop is offline, so it needs this value locally.
+      reorder_point: row.reorder_point === null ? null : Number(row.reorder_point),
       is_stock_tracked: row.is_stock_tracked,
       is_active: row.is_active,
       version: row.version,
@@ -191,6 +199,7 @@ export class CatalogService {
         'products.is_active',
         'products.price_minor',
         'products.cost_minor',
+        'products.reorder_point',
         'products.version',
         'products.updated_at',
         'tax_categories.rate_bp as tax_rate_bp',
@@ -257,6 +266,7 @@ export class CatalogService {
               is_stock_tracked: input.isStockTracked ?? true,
               price_minor: input.priceMinor ?? 0,
               cost_minor: input.costMinor ?? 0,
+              reorder_point: input.reorderPoint ?? null,
             })
             .execute();
 
@@ -478,6 +488,8 @@ export class CatalogService {
           is_active: input.isActive ?? current.is_active,
           price_minor: input.priceMinor ?? current.price_minor,
           cost_minor: input.costMinor ?? current.cost_minor,
+          // Absent keeps, explicit null clears — the same rule the brand and category follow.
+          reorder_point: input.reorderPoint === undefined ? current.reorder_point : input.reorderPoint,
           version: current.version + 1,
           updated_at: new Date(),
         })
@@ -601,6 +613,7 @@ export class CatalogService {
               is_active: row.isActive,
               price_minor: row.priceMinor,
               cost_minor: row.costMinor,
+              reorder_point: row.reorderPoint ?? null,
             })
             .execute();
           if (row.barcodes) await this.replaceBarcodes(trx, tenantId, id, row.barcodes);
@@ -615,7 +628,9 @@ export class CatalogService {
               // included: a file with no `brand` column clears the brand exactly as it clears the
               // category. The barcode column is the one exception: when the file has no barcode
               // column at all, the stored set is left alone rather than wiped because someone
-              // omitted a column (see PlannedProductRow.barcodes).
+              // omitted a column (see PlannedProductRow.barcodes). The threshold follows the SAME
+              // carve-out: a file that never carried `reorder_point` must not wipe thresholds
+              // somebody set by hand, while a blank CELL in a present column clears one.
               sku: row.sku,
               name: row.name,
               description: row.description,
@@ -627,6 +642,7 @@ export class CatalogService {
               is_active: row.isActive,
               price_minor: row.priceMinor,
               cost_minor: row.costMinor,
+              reorder_point: row.reorderPoint === undefined ? before.reorder_point : row.reorderPoint,
               version: Number((before as { version?: number }).version ?? 1) + 1,
               updated_at: new Date(),
             })

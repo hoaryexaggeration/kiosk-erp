@@ -97,6 +97,9 @@ class ProductRepository(private val db: KioskDatabase) {
                         brandId = obj["brand_id"]?.jsonPrimitive?.contentOrNull,
                         brandName = obj["brand_name"]?.jsonPrimitive?.contentOrNull,
                         unitKind = obj["unit_kind"]?.jsonPrimitive?.contentOrNull,
+                        // A product event carries the WHOLE payload (item 4.9 included), so a
+                        // threshold set on the server lands on a device that is already synced.
+                        reorderPoint = obj["reorder_point"]?.jsonPrimitive?.contentOrNull?.toDoubleOrNull(),
                         isActive = obj["is_active"]?.jsonPrimitive?.content?.toBooleanStrictOrNull() ?: true,
                     ),
                 ),
@@ -142,6 +145,7 @@ class ProductRepository(private val db: KioskDatabase) {
         brandId = brandId,
         brandName = brandName,
         unitKind = unitKind,
+        reorderPoint = reorderPoint,
         isActive = isActive,
     )
 }

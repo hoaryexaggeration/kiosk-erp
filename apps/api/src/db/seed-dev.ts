@@ -94,6 +94,8 @@ export interface DemoProduct {
   /** Twelve-digit EAN-13 bodies; the check digit is added by `ean13`. Empty means "not labelled". */
   barcodes: string[];
   opening?: number;
+  /** Low-stock threshold in base units (item 4.9); absent means "no alert configured". */
+  reorderPoint?: number;
 }
 
 /**
@@ -111,8 +113,8 @@ export interface DemoProduct {
  */
 export const DEMO_CATALOGUE: readonly DemoProduct[] = [
   { n: 3, sku: 'SKU-003', name: 'Sugar 1kg', category: 'Groceries', unit: 'ea', brand: 'Savannah Foods', priceMinor: 18500, costMinor: 14500, barcodes: ['600100000003'], opening: 40, description: 'Refined cane sugar' },
-  { n: 4, sku: 'SKU-004', name: 'Sunflower oil 1L', category: 'Groceries', unit: 'ea', brand: 'Savannah Foods', priceMinor: 32000, costMinor: 26500, barcodes: ['600100000004'], opening: 24 },
-  { n: 5, sku: 'SKU-005', name: 'Pishori rice 2kg', category: 'Groceries', unit: 'ea', brand: 'Savannah Foods', priceMinor: 42000, costMinor: 34000, barcodes: ['600100000005'], opening: 18 },
+  { n: 4, sku: 'SKU-004', name: 'Sunflower oil 1L', category: 'Groceries', unit: 'ea', brand: 'Savannah Foods', priceMinor: 32000, costMinor: 26500, barcodes: ['600100000004'], opening: 24, reorderPoint: 12 },
+  { n: 5, sku: 'SKU-005', name: 'Pishori rice 2kg', category: 'Groceries', unit: 'ea', brand: 'Savannah Foods', priceMinor: 42000, costMinor: 34000, barcodes: ['600100000005'], opening: 18, reorderPoint: 20, description: 'Watched: 18 on the shelf breaches the point at 20 (item 4.9)' },
   { n: 6, sku: 'SKU-006', name: 'Maize flour 2kg', category: 'Groceries', unit: 'ea', brand: 'Savannah Foods', priceMinor: 23500, costMinor: 19000, barcodes: ['600100000006'], opening: 30, description: 'Fine grade, unga wa sema' },
   { n: 7, sku: 'SKU-007', name: 'Tea leaves 250g', category: 'Groceries', unit: 'ea', brand: 'Savannah Foods', priceMinor: 27500, costMinor: 22000, barcodes: ['600100000007'], opening: 20 },
   // The crate demonstration (item 4.6): bought by the crate, sold by the bottle, ONE ledger.
@@ -124,12 +126,12 @@ export const DEMO_CATALOGUE: readonly DemoProduct[] = [
   // Weighed goods: a fractional conversion into a `weight` base is a fact, into a `count` base it is not.
   { n: 11, sku: 'SKU-011', name: 'Tomatoes', category: 'Fresh produce', unit: 'kg', conversions: [{ unit: 'g', factor: 0.001 }], priceMinor: 12000, costMinor: 8000, taxCategory: 'zero', barcodes: [], opening: 15, description: 'Loose, weighed at the till' },
   { n: 12, sku: 'SKU-012', name: 'Bananas', category: 'Fresh produce', unit: 'kg', priceMinor: 15000, costMinor: 10000, taxCategory: 'zero', barcodes: [], opening: 12, description: 'Loose, weighed at the till' },
-  { n: 13, sku: 'SKU-013', name: 'Eggs tray (30)', category: 'Fresh produce', unit: 'ea', conversions: [{ unit: 'tray', factor: 30 }], priceMinor: 48000, costMinor: 41000, barcodes: ['600100000013'], opening: 10 },
+  { n: 13, sku: 'SKU-013', name: 'Eggs tray (30)', category: 'Fresh produce', unit: 'ea', conversions: [{ unit: 'tray', factor: 30 }], priceMinor: 48000, costMinor: 41000, barcodes: ['600100000013'], opening: 10, reorderPoint: 12 },
   { n: 14, sku: 'SKU-014', name: 'Detergent 500g', category: 'Household', unit: 'ea', brand: 'Neema Home', priceMinor: 21000, costMinor: 17000, barcodes: ['600100000014'], opening: 25 },
-  { n: 15, sku: 'SKU-015', name: 'Bar soap 800g', category: 'Household', unit: 'ea', brand: 'Neema Home', priceMinor: 9500, costMinor: 7000, barcodes: ['600100000015'], opening: 40 },
+  { n: 15, sku: 'SKU-015', name: 'Bar soap 800g', category: 'Household', unit: 'ea', brand: 'Neema Home', priceMinor: 9500, costMinor: 7000, barcodes: ['600100000015'], opening: 40, reorderPoint: 15 },
   { n: 16, sku: 'SKU-016', name: 'Toilet paper (4 rolls)', category: 'Household', unit: 'ea', brand: 'Neema Home', priceMinor: 26000, costMinor: 21000, barcodes: ['600100000016'], opening: 22 },
   { n: 17, sku: 'SKU-017', name: 'Toothpaste 100ml', category: 'Personal care', unit: 'ea', brand: 'Neema Home', priceMinor: 17500, costMinor: 13500, barcodes: ['600100000017'], opening: 20 },
-  { n: 18, sku: 'SKU-018', name: 'Shampoo 400ml', category: 'Personal care', unit: 'ea', brand: 'Neema Home', priceMinor: 38000, costMinor: 31000, barcodes: ['600100000018'], opening: 8 },
+  { n: 18, sku: 'SKU-018', name: 'Shampoo 400ml', category: 'Personal care', unit: 'ea', brand: 'Neema Home', priceMinor: 38000, costMinor: 31000, barcodes: ['600100000018'], opening: 8, reorderPoint: 10 },
   { n: 19, sku: 'SKU-019', name: 'Mobile top-up KES 100', category: null, unit: 'ea', priceMinor: 10000, costMinor: 10000, barcodes: [], stockTracked: false, description: 'Sold as a service: no stock, no category' },
   { n: 20, sku: 'SKU-020', name: 'Dishwashing liquid 750ml', category: 'Household', unit: 'ea', brand: 'Neema Home', priceMinor: 24000, costMinor: 19500, barcodes: ['600100000020'], opening: 14, active: false, description: 'Discontinued — must never appear at the till' },
 ];
@@ -259,6 +261,7 @@ export async function seedDev(dbs: DbService): Promise<void> {
           is_active: p.active ?? true,
           price_minor: p.priceMinor,
           cost_minor: p.costMinor,
+          reorder_point: p.reorderPoint ?? null,
         })),
       ])
       .onConflict((oc) => oc.column('id').doNothing())

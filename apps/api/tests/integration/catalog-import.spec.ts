@@ -152,6 +152,44 @@ describe('catalogue bulk import (Phase 4, item 4.4)', () => {
     expect(product.barcodes).toEqual(['6009000000059']);
   });
 
+  it('sets thresholds from a column, keeps them when the column disappears, clears on a blank cell (item 4.9)', async () => {
+    const withColumn = await runImport(token, {
+      csv: ['sku,name,price,reorder_point', 'IMP-R1,Watched rice,420,20', 'IMP-R2,Unwatched soap,95,'].join('\n'),
+      commit: true,
+    });
+    expect(withColumn.status).toBe(201);
+    expect(withColumn.body).toMatchObject({ status: 'committed', createCount: 2, errorCount: 0 });
+    expect((await productBySku('IMP-R1')).reorder_point).toBe(20);
+    expect((await productBySku('IMP-R2')).reorder_point).toBeNull();
+
+    // A re-import WITHOUT the column is not a decision to stop watching: the threshold survives,
+    // the same carve-out the barcode column gets.
+    const noColumn = await runImport(token, {
+      csv: ['sku,name,price', 'IMP-R1,Watched rice,420'].join('\n'),
+      commit: true,
+    });
+    expect(noColumn.body).toMatchObject({ status: 'committed', errorCount: 0 });
+    expect((await productBySku('IMP-R1')).reorder_point).toBe(20);
+
+    // A blank cell in a PRESENT column is the operator clearing one on purpose.
+    const clearedCell = await runImport(token, {
+      csv: ['sku,name,price,reorder_point', 'IMP-R1,Watched rice,420,'].join('\n'),
+      commit: true,
+    });
+    expect(clearedCell.body).toMatchObject({ status: 'committed', errorCount: 0 });
+    expect((await productBySku('IMP-R1')).reorder_point).toBeNull();
+  });
+
+  it('reports a threshold that is not a number at or above zero instead of importing zeros (item 4.9)', async () => {
+    const res = await runImport(token, {
+      csv: ['sku,name,price,reorder_point', 'IMP-R3,Negative,100,-5'].join('\n'),
+      commit: true,
+    });
+    expect(res.body.status).toBe('invalid');
+    expect(res.body.errors.map((error: { code: string }) => error.code)).toEqual(expect.arrayContaining(['INVALID_NUMBER']));
+    expect(await productBySku('IMP-R3')).toBeUndefined();
+  });
+
   it('requires catalog.manage', async () => {
     const res = await runImport(cashierToken, { csv: 'sku,name,price\nIMP-7,Nope,10', commit: true });
     expect(res.status).toBe(403);

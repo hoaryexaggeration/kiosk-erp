@@ -27,7 +27,7 @@ Status key: ✅ present · 🟡 partial · ❌ absent.
 | 1 | Domain contracts, data model, sync spec | 🟡 | Fixtures, sync protocol, posting matrix, ADRs, UoM/pack-size contract (`units-and-conversions.md`) exist; **no OpenAPI skeleton, no ERD, no state machines beyond `Sale`, no event-version policy** |
 | 2 | Backend foundation and cloud controls | 🟡 | NestJS + Postgres + auth/RBAC + devices + licensing + outbox work; **no CI, no staging deploy, no backups/restore drill, no OpenAPI generation, no rate limits, `LicenseBillingModule` absent** |
 | 3 | Native shell, local DB, sync center | 🟡 | Shell, Room, push/pull, Sync Center, enrolment work; **`LicenseManager` request export (`.licreq`/QR), entitlement display, Keystore installation key, replay/rollback detection, app lock/offline expiry absent** |
-| 4 | Catalogue, pricing, inventory ledger | 🟡 | Products/barcodes/tax/categories/promotions + movement ledger + balances work; product CRUD UI, category/units/brands/tax management, bulk import, opening-stock import and movement history UI all in; units + pack conversions + brands now hold one base-unit ledger; cross-branch transfers (dispatch/receipt/discrepancy) move goods under one document; stocktakes turn a shelf reading into movements with reason and actor; **no price lists/scheduled prices, no low-stock thresholds, no variants, no supplier product codes** |
+| 4 | Catalogue, pricing, inventory ledger | 🟡 | Products/barcodes/tax/categories/promotions + movement ledger + balances work; product CRUD UI, category/units/brands/tax management, bulk import, opening-stock import and movement history UI all in; units + pack conversions + brands now hold one base-unit ledger; cross-branch transfers (dispatch/receipt/discrepancy) move goods under one document; stocktakes turn a shelf reading into movements with reason and actor; low-stock thresholds flag a breached shelf on the device, offline; **no price lists/scheduled prices, no variants, no supplier product codes** |
 | 5 | Offline POS vertical slice | 🟡 | Search, scan, cart, offline cash sale, outbox, idempotent posting work; **no cashier session/role gate, no discounts UI, no price override, no customer on sale, no split tender, no hold/resume, no void, no receipt rendering/printing, no sales-history screen** |
 | 6 | Cash, shifts, refunds, end-of-day | ❌ | `cash_sessions`/`cash_movements` tables only; no float, count, variance, approval, shift close, returns/refunds/exchange |
 | 7 | Customers, suppliers, debtors, creditors | ❌ | `customers`/`suppliers`/`customer_ledger_entries` tables only; no modules, no UI, no credit policy |
@@ -124,7 +124,7 @@ must be completed when its target phase is reached.
 | D7a | Stock valuation is **FIFO with valuation layers** (ADR 0009), replacing weighted average | §7, §18.5 | 4 ✔ | ✔ |
 | D7b | Till blocks a sale that would take stock negative; `UNCOSTED_STOCK` resolution path | §18.5 | 5 | ☐ |
 | D7c | Branch edge gateway (ADR 0010) — new MVP component | §6, §17 | 5–11 | ☐ |
-| D8 | Low-stock/reorder thresholds + alerts | §3.D | 4 | ☐ |
+| D8 | Low-stock/reorder thresholds + alerts | §3.D | 4 | ✔ (in-app alerts on the Stock screen; push delivery is a later phase) |
 | D9 | Editing barcodes on an existing product (`PATCH /v1/products/:id`) | §3.C | 4 ✔ | ✔ |
 | D10 | Cashier session + role gate on the till | §15 Ph5 | 5 | ☐ |
 | D11 | Discounts (line/order), price override with permission, customer on sale, notes | §3.B, §15 Ph5 | 5 | ☐ |
@@ -169,7 +169,7 @@ each later phase is expanded to the same granularity as it becomes current.
 | 4.6 ✔ | Units of measure + pack conversions + brands (D4a, D4b) | Done: `units_of_measure` (`kind` = count/weight/volume — the rule, not a label), product-scoped `unit_conversions` as a SET (factor = base units per 1 of the pack), `brands` + `products.brand_id`; `InventoryService.resolveQuantity` is the single conversion point, so a movement is always recorded in `products.unit` and remembers `entered_unit`/`entered_quantity`; receipts, adjustments and opening import all convert, quoted costs divide to cost-per-base, overrides are measured in base; `unit_kind` rides the product payload so a device converts offline; device: Room v4 (brand, conversions, unitKind), product editor pack sizes + brand + unit picker, Manage gains Units & Brands, stock adjust dialog picks a pack and previews `10 crate = 240 ea` with the server's own reference implementation, history shows `10 crate → +240 ea`; 74/74 fixtures + 127/127 API tests; `units-and-conversions.md` |
 | 4.7 ✔ | Cross-branch stock transfers with dispatch/receipt/discrepancy states (D6, ADR 0008) | Done: stock is in exactly one branch or in transit, never both — `stock_transfers` + `stock_transfer_lines` (one document, two per-branch steps, `from <> to` and status↔`received_at` by CHECK, `UNIQUE (tenant, reference)`); dispatch consumes the source's FIFO layers (`costMode: 'transfer'` — allocations, no COGS) and stamps a carried cost per base unit on each line, the receipt opens the destination's layer at that same cost; in transit belongs to **neither** branch; shortages stay on the document as `discrepancy` and need a supervisor note, over-receipt refused; `TRF-0001` from a tenant-wide series; `inventory.transfer` + branch-scoped list (ADR 0008 item 5, pushOne `BRANCH_MISMATCH`); device: Room v5 (transfers + lines + branches), outbox `StockTransfer` commands, direction pills, send/count screens, in-transit under Stock rows; 74/74 fixtures + 145/145 API tests; `stock-transfers.md` |
 | 4.8 ✔ | Stocktake / cycle count (D7) | Done: the device sends **counted** quantities (never deltas) and the server derives each variance against its own book — agreement writes **nothing**, disagreement writes one movement with `reason: 'stocktake'` and the actor on it; short variances book FIFO cost, found stock opens a layer at the last known cost; pack counts land as the pack only when the variance divides exactly; `quantity >= 0` means a count can never need the negative-stock override; `inventory.adjust`, one `Stocktake` outbox command (offline), uncosted shortages → `review_required` + `UNCOSTED_STOCK`; device: Stock → Stocktake count sheet with pack pills, variance **in words**, `Stock count` + `by <name>` in history; 74/74 fixtures + 156/156 API tests; `stocktake-count.md` |
-| 4.9 | Low-stock thresholds and alerts (D8) | Threshold breach is visible on the Stock screen |
+| 4.9 ✔ | Low-stock thresholds and alerts (D8) | Done: `products.reorder_point` (nullable ≥0, base units, tenant-wide on the shared catalogue — the breach itself is per-branch, computed on the device from cached balances so it shows offline); NULL = "no alert configured"; Stock banner names the breached lines and each row carries `LOW (≤ n unit)` / `OUT OF STOCK`; editor field under Stock & status (tracked products only); import column `reorder_point` with the barcode-style carve-out (omitted column leaves stored thresholds alone, blank cell clears); push delivery stays a later phase; 163/163 API tests; `low-stock.md` |
 | 4.10 ✔ | Movement history UI per product/location (D8) | Done: per-product history in the Stock tab (source, signed quantity, reason, date, COGS); reads the server ledger |
 | 4.11 | Price lists / branch prices / scheduled prices + price-change history (D5) | A price change is versioned; a stale device price is flagged, never silently overwritten |
 
@@ -406,6 +406,34 @@ nobody else can answer: how many units are actually on this shelf.
   rows *Stock count* and now shows `by <name>` — the API's movement history exposes
   `actor_id`/`actor_name` for every movement, not only counts.
 - Documented in `docs/operations/stocktake-count.md`; 11 endpoint tests in `stocktake.spec.ts`.
+
+#### Low-stock thresholds and alerts (v0.4.10, item 4.9)
+
+One number per product answers "when do I buy more of this": `products.reorder_point` — nullable,
+at or above zero, in the product's **base** units (`0007_reorder_point.sql`). It lives on the
+product because the catalogue is shared across branches (§18 owner decision): a reorder point is a
+fact about the good, not about one shelf. Per-shelf levels would be a per-branch attribute like
+pricing (item 4.11) and are deliberately not this. `NULL` means no alert is configured — each line
+opts IN to being watched, so nobody drowns in every zero-stock service item.
+
+The breach is **computed on the device from its own cached balances** (`quantity <= threshold`),
+which is exactly why the threshold ships with the product in every payload and event: the Stock
+screen answers while the phone is offline. It shows the breach two ways — a warning banner naming
+the lines ("2 products at or below the reorder point • Pishori rice 2kg 18 ea (point 20) • …") and
+a per-row state pill: `LOW (≤ n unit)` in amber, `OUT OF STOCK` in red (threshold set and balance
+zero). A `null` quantity is "not cached", never zero, so it never claims a breach; a product with
+no threshold gets no pill — silence is stated by absence, never by a green tick (§6).
+
+- Set per product in the catalogue editor ("Stock & status", stock-tracked products only), or in
+  bulk with the `reorder_point` import column — which gets the barcode carve-out: a file that never
+  carried the column leaves stored thresholds alone, while a blank cell in a present column clears
+  one on purpose.
+- API: `reorderPoint` on create and update (null clears, absent keeps), carried in
+  `productPayload` and therefore in every `product.created`/`product.updated` event; file values
+  follow the same loud-failure rule as prices (at or above zero, at most 6 decimals).
+- Push-notification alerts ("tell me the moment stock breaches") and per-branch min/max levels with
+  replenishment suggestions remain later phases; dashboards will aggregate this same flag (§3.D).
+- Documented in `docs/operations/low-stock.md`; 163/163 API tests across 14 suites, 74/74 fixtures.
 
 ### Phase 5 — Offline POS vertical slice (current phase)
 

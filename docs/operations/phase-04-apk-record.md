@@ -5,13 +5,13 @@ Required by §15 "Mandatory Android APK delivery gate". Every field below is par
 | Field | Value |
 |---|---|
 | **Phase** | 4 — Catalogue, pricing/promotions and inventory (+ post-phase polish) |
-| **App version** | `0.4.9` (versionCode 409) |
-| **Artifact** | `artifacts/retail-erp-p04-v0.4.9.apk` |
-| **SHA-256** | `c34727167daf71e3c880d2655e0001dba8ef8611e1b40ebf3fb49eb33aca7499` |
-| **Size** | ~42.4 MB (42,394,809 bytes; bundled ML Kit barcode models, unminified debug build) |
+| **App version** | `0.4.10` (versionCode 410) |
+| **Artifact** | `artifacts/retail-erp-p04-v0.4.10.apk` |
+| **SHA-256** | `b6637e087792e7a9d086067d2d2001651156f9b4281dcd7b6e849f93a72df3f7` |
+| **Size** | ~42.4 MB (42,411,193 bytes; bundled ML Kit barcode models, unminified debug build) |
 | **Signing** | **Stable internal-test key** (`CN=Kiosk ERP Internal Test`, cert SHA-256 `935c0fbc6993db9ca761b4c3610c71a50d91897fd9b1753d0da3e56dffd056dd`), generated once by `build-apk.sh` and git-ignored (ADR 0005) |
-| **Build** | Docker image `kiosk-erp-android-builder` (JDK 17 + Android SDK 34 + Gradle 8.7); `PHASE=04 VERSION=0.4.9 bash infra/docker/android/build-apk.sh` |
-| **Expected backend** | `apps/api` on `http://<host>:3000/v1` with migration `0006`; seed tenant + **two** branches (Main Kiosk, and West Kiosk — item 4.7's second shelf) and a 20-product demo catalogue with 9 units, 3 brands and 4 pack sizes — see `demo-catalogue.md` |
+| **Build** | Docker image `kiosk-erp-android-builder` (JDK 17 + Android SDK 34 + Gradle 8.7); `PHASE=04 VERSION=0.4.10 bash infra/docker/android/build-apk.sh` |
+| **Expected backend** | `apps/api` on `http://<host>:3000/v1` with migration `0007`; seed tenant + **two** branches (Main Kiosk, and West Kiosk — item 4.7's second shelf) and a 20-product demo catalogue with 9 units, 3 brands, 4 pack sizes and 5 low-stock thresholds — see `demo-catalogue.md` |
 
 **Build history inside Phase 4** (each is signed with the same stable key, so each upgrades in place):
 
@@ -26,6 +26,7 @@ Required by §15 "Mandatory Android APK delivery gate". Every field below is par
 | `0.4.7` | 407 | `31764202b6a0a00e` | Cross-branch transfers (4.7): dispatch/receipt documents, direction pills, send + count screens, in-transit under Stock rows, branch-scoped balances |
 | `0.4.8` | 408 | `fc2002a0de9dca37` | Stocktakes (4.8): count sheet with pack pills and variance in words, counted-not-delta payloads, `Stock count` + who did it in history |
 | `0.4.9` | 409 | `c34727167daf71e3` | Scan-to-add a product (auto SKU) + physical-phone setup guidance |
+| `0.4.10` | 410 | `b6637e087792e7a9` | Low-stock thresholds (4.9): reorder point on the product, Stock-screen breach banner + `LOW`/`OUT` pills computed offline, editor field, bulk-set via import |
 
 > **Upgrade note.** Phase 3's APK was signed with the throwaway Android debug key, so it **cannot be
 > upgraded in place** by this build (signature mismatch) — uninstall the Phase 3 build first. This is
@@ -395,18 +396,58 @@ Scan-to-add a product + physical-phone setup (`0.4.9`, owner request):
   /10.0.2.2:3000`. README gains a *Setting up a physical phone* section; `usesCleartextTraffic` was
   already enabled, so LAN HTTP is not the blocker.
 
+**v0.4.10 — low-stock thresholds and alerts (item 4.9, D8).**
+
+Server (`apps/api`):
+
+- **Migration `0007`**: `products.reorder_point`, nullable, at or above zero, in the product's base
+  units. It lives on the product because the catalogue is shared across branches (§18); `NULL`
+  means "no alert configured" — every line opts in to being watched.
+- **Catalogue API**: `reorderPoint` on create and update (explicit null clears, absent keeps,
+  mirroring the brand/category rule), carried in `productPayload` and therefore in every
+  `product.created` / `product.updated` server event — the device computes the breach from its own
+  cache, offline, which is why the threshold rides the same payload as the price.
+- **Import**: a `reorder_point` column (`reorder`, `reorder_at`, `low_stock`) sets thresholds in
+  bulk, with the barcode carve-out — a file that never carried the column leaves stored thresholds
+  alone, a blank cell in a present column clears one, and a non-number or negative value fails the
+  row loudly (`INVALID_NUMBER`) instead of importing zeros. Documented in
+  `catalogue-import-format.md`.
+- **Demo seed**: five products carry thresholds — SKU-005 (18 on hand, point 20), SKU-013 (10,
+  point 12) and SKU-018 (8, point 10) breach on a fresh seed so the Stock screen has something to
+  say; SKU-004 (24, point 12) and SKU-015 (40, point 15) show the healthy-watched state.
+- **Tests**: catalog-pricing gains the create/list/keep-on-absent/clear round trip and a negative
+  refused with `422 VALIDATION_ERROR`; catalog-import gains the column/omitted/blank-cell trio and
+  the invalid-value refusal — **163/163 across 14 suites**.
+
+Android:
+
+- **Room v6** (`MIGRATION_5_6`): `ProductEntity.reorderPoint`, parsed from the product list, the
+  create/update response and — importantly — from `product.created` / `product.updated` events, so
+  a threshold set on the server lands on an already-synced device.
+- **Catalogue editor**: *Reorder point (`<unit>`)* under **Stock & status**, shown only for
+  stock-tracked products, decimal keypad, blank = no alert; junk text disables Save rather than
+  failing on submit. Activate/deactivate carries the threshold with it so the replacement draft
+  cannot lose the watch.
+- **Stock screen**: a warning banner names the breached lines ("3 products at or below the reorder
+  point • Pishori rice 2kg 18 ea (point 20) • …"), and each row carries its own state pill —
+  `LOW (≤ n unit)` in amber, `OUT OF STOCK` in red — computed from the same cached balances the
+  rows read, so it all works with the radio off. A product with no threshold gets no pill; silence
+  is absence, never a green tick.
+
 ## Verification
 
 - `npm run verify` (fixtures + API tests): **74/74** domain-fixture checks (pricing, money parsing and
-  the unit-conversion vectors) and **159/159 API tests** across 14 suites — auth, catalog-import,
-  catalog-pricing **(11: catalogue exports, optimistic-concurrency create/update, barcodes, tax
-  category, auto-SKU generation ×3, explicit duplicate refused, blank edit keeps the SKU, promotions)**,
-  inventory, licensing, opening-stock-import, sync-sale, units-conversions, **transfers (18: both
-  halves end to end, the conservation and cost claims, every refusal, branch scoping, numbering,
-  idempotent replay)**, **stocktake (11: reason + actor movements, silent agreement, FIFO loss on a
-  zero count, pack vs base variances, refused non-numbers, unknown lines, replay, `FORBIDDEN`,
-  uncosted review with a durable conflict case)**, plus the `product-import`, `opening-stock-import`,
-  `unit-conversion` and `domain-fixtures` unit suites — against Docker Postgres.
+  the unit-conversion vectors) and **163/163 API tests** across 14 suites — auth, catalog-import
+  **(+2: thresholds set/kept/cleared through the column, invalid value refused)**, catalog-pricing
+  **(13: catalogue exports, optimistic-concurrency create/update, barcodes, tax category, auto-SKU
+  generation ×3, explicit duplicate refused, blank edit keeps the SKU, low-stock threshold round
+  trip + negative refused, promotions)**, inventory, licensing, opening-stock-import, sync-sale,
+  units-conversions, **transfers (18: both halves end to end, the conservation and cost claims,
+  every refusal, branch scoping, numbering, idempotent replay)**, **stocktake (11: reason + actor
+  movements, silent agreement, FIFO loss on a zero count, pack vs base variances, refused
+  non-numbers, unknown lines, replay, `FORBIDDEN`, uncosted review with a durable conflict case)**,
+  plus the `product-import`, `opening-stock-import`, `unit-conversion` and `domain-fixtures` unit
+  suites — against Docker Postgres.
 - `tsc -p tsconfig.build.json --noEmit`: clean.
 - `seed:dev` run twice against a freshly migrated database: **20 products / 18 barcodes / 9 units /
   3 brands / 4 pack conversions / 18 opening movements / 2 branches** both times — the demo catalogue
@@ -482,6 +523,10 @@ Scan-to-add a product + physical-phone setup (`0.4.9`, owner request):
 | 36 | Physical phone: Settings → API address shows the emulator hint; leave `10.0.2.2` and **Set up** → the failure now reads *this phone cannot reach … 10.0.2.2 only works inside the emulator…*; set the computer's LAN address (`http://<LAN ip>:3000/v1`), open `<address>/health` in the phone's browser first (JSON), then **Set up** succeeds and pulls the catalogue | ☐ |
 | 37 | Catalogue: scan a barcode **not in the catalogue** (e.g. `6099999999991`) → *Nothing here has barcode …* with **Create product with this barcode** → the editor opens with the barcode already listed and SKU blank (`blank = auto-generate`) → enter name + price → **Save** → toast `… saved as SKU-021`, and the new product appears in the list with its barcode | ☐ |
 | 38 | Catalogue: scan a barcode that **is** in the catalogue → its product opens as before; in an existing product's editor, type a code into *Add barcode* and press the scanner's Enter → the barcode is added without touching **Add**; clear an existing product's SKU and save → the SKU is **unchanged** (blank keeps it), while a fresh product's save message shows the generated number | ☐ |
+| 39 | Stock tab (fresh seed, Main branch): a warning banner reads *3 products at or below the reorder point* naming Pishori rice 2kg (18 ea, point 20), Eggs tray (30) (10 ea, point 12) and Shampoo 400ml (8 ea, point 10); those rows carry a `LOW (≤ …)` pill and Sunflower oil / Bar soap carry none | ☐ |
+| 40 | Catalogue: open Pishori rice 2kg → *Reorder point (ea)* shows `20`; change it to `5` and save → the Stock banner and the row's pill are gone (18 > 5); set it back to `20` → the pill returns after **Refresh from server** (or immediately in the cached view) | ☐ |
+| 41 | Catalogue: clear a product's reorder point (blank field) and save → the row shows no pill; typing junk (e.g. `abc`) disables **Save**; deactivate/reactivate a watched product → its threshold is still there afterwards | ☐ |
+| 42 | Catalogue → Import: commit a CSV with a `reorder_point` column (values + one blank cell) → the thresholds land on those products; re-import the same file **without** the column → stored thresholds survive; a blank cell in a present column clears its threshold | ☐ |
 
 A failure involving lost transactions, duplicate posting, corrupted local data or a false
 payment/tax status blocks the phase.

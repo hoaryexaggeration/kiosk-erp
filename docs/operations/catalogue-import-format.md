@@ -41,6 +41,7 @@ of zero. Required columns are marked ✅.
 | `unit` (`uom`, `unit_of_measure`) | Defaults to `ea`. |
 | `barcodes` (`barcode`, `ean`, `upc`) | One or more codes, separated by `\|`, `;` or a space. **Replaces** the product's barcode set. |
 | `stock_tracked` (`track_stock`, `tracked`) | `yes`/`no`, `true`/`false`, `1`/`0`. Defaults to `yes`. |
+| `reorder_point` (`reorder`, `reorder_at`, `low_stock`) | Low-stock threshold in the product's **base unit** (item 4.9): at or below it the Stock screen flags the shelf. At most 6 decimals. A blank **cell** clears a threshold; an omitted **column** leaves stored thresholds alone. |
 | `active` (`is_active`, `enabled`) | Same vocabulary. Defaults to `yes`. |
 
 ### Prices are parsed exactly
@@ -67,7 +68,9 @@ not priced by them, so they are safe to create from a file — unlike a tax rate
 
 As with categories, **the file is the desired state**: a file with no `brand` column, or an empty
 `brand` value, leaves a product with no brand after the update. (Barcodes and pack sizes are the
-exception to this — they are sets, and an omitted *set* column is left alone.)
+exception to this — they are sets, and an omitted *set* column is left alone. `reorder_point` gets
+the same carve-out: an omitted threshold column must not wipe a watch-list somebody set by hand,
+while a blank cell in a present column deliberately clears one.)
 
 
 ### Barcodes

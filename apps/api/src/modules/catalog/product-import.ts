@@ -25,6 +25,7 @@ const COLUMN_ALIASES: Record<string, string[]> = {
   cost: ['cost', 'cost_price', 'buying_price', 'purchase_price'],
   barcodes: ['barcodes', 'barcode', 'ean', 'upc'],
   stock_tracked: ['stock_tracked', 'track_stock', 'tracks_stock', 'tracked'],
+  reorder_point: ['reorder_point', 'reorder', 'reorder_at', 'low_stock'],
   active: ['active', 'is_active', 'enabled'],
 };
 
@@ -62,6 +63,13 @@ export interface PlannedProductRow {
   isActive: boolean;
   priceMinor: number;
   costMinor: number;
+  /**
+   * Low-stock threshold in base units (item 4.9): a number, or null for a blank cell in a column
+   * that IS present (clearing one on purpose). Undefined means the file has no `reorder_point`
+   * column at all — an update then leaves the stored threshold alone, the same carve-out the
+   * barcode column gets, because a plain re-import must not wipe thresholds set by hand.
+   */
+  reorderPoint?: number | null;
   /**
    * The full desired barcode set, or null when the file has no barcode column at all — an update then
    * leaves the stored set alone instead of wiping it because someone omitted a column.
@@ -256,6 +264,23 @@ export function planProductImport(
       else isActive = parsed;
     }
 
+    // Threshold (item 4.9): valueAt tells "no column" (null) from "blank cell" (''), and the two
+    // mean different things — absent must not wipe what somebody set by hand, blank clears.
+    let reorderPoint: number | null | undefined = undefined;
+    const reorderText = valueAt(row, 'reorder_point');
+    if (reorderText !== null) {
+      if (reorderText.length === 0) reorderPoint = null;
+      else {
+        const parsed = Number(reorderText);
+        // Six decimals is the column's own precision: beyond it the database would round silently,
+        // and this file should say so out loud instead of quietly moving someone's number.
+        const decimals = reorderText.includes('.') ? reorderText.split('.')[1].length : 0;
+        if (!Number.isFinite(parsed) || parsed < 0 || decimals > 6) {
+          fail('reorder_point', 'INVALID_NUMBER', `"${reorderText}" is not a quantity at or above zero (at most 6 decimals)`);
+        } else reorderPoint = parsed;
+      }
+    }
+
     // Tax must already exist: silently inventing a VAT rate from a typo is a money error.
     let taxCategoryId: string | null = null;
     const taxText = valueAt(row, 'tax') ?? '';
@@ -375,6 +400,7 @@ export function planProductImport(
       isActive,
       priceMinor,
       costMinor,
+      reorderPoint,
       barcodes,
     });
   }

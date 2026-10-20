@@ -44,6 +44,8 @@ data class ProductEditorState(
     val priceText: String = "",
     val costText: String = "",
     val isStockTracked: Boolean = true,
+    /** The low-stock threshold exactly as typed (item 4.9); blank means "no alert configured". */
+    val reorderText: String = "",
     val isActive: Boolean = true,
     val expectedVersion: Int? = null,
     val barcodes: List<String> = emptyList(),
@@ -60,11 +62,14 @@ data class ProductEditorState(
     /** Live, exact validity so the save button can be disabled rather than failing on submit. */
     val priceMinor: Long? get() = Pricing.parseMinorInput(priceText)
     val costMinor: Long? get() = if (costText.isBlank()) 0L else Pricing.parseMinorInput(costText)
+    /** What the Save button will send: blank = null = "no watch"; junk blocks the save (item 4.9). */
+    val reorderPoint: Double? get() = reorderText.trim().toDoubleOrNull()?.takeIf { it >= 0 && it.isFinite() }
+    val reorderInvalid: Boolean get() = reorderText.isNotBlank() && reorderPoint == null
     /**
      * The SKU is deliberately NOT part of validity: blank means "the server names it" on a new
      * product and "keep the current one" on an edit (scan-to-add, v0.4.9).
      */
-    val canSave: Boolean get() = !saving && name.isNotBlank() && priceMinor != null && costMinor != null
+    val canSave: Boolean get() = !saving && name.isNotBlank() && priceMinor != null && costMinor != null && !reorderInvalid
     /** What a pack row reads: `1 crate = 24 ea`. */
     fun conversionLabel(conversion: ServerConversion): String = "1 ${conversion.unit} = ${Units.formatQuantity(conversion.factor)} $unit"
 }
@@ -230,6 +235,7 @@ class CatalogViewModel(
                 priceText = Pricing.formatMinor(product.priceMinor),
                 costText = Pricing.formatMinor(product.costMinor),
                 isStockTracked = product.isStockTracked,
+                reorderText = product.reorderPoint?.let { Units.formatQuantity(it) } ?: "",
                 isActive = product.isActive,
                 expectedVersion = product.version,
                 barcodes = barcodes,
@@ -337,6 +343,7 @@ class CatalogViewModel(
                 priceMinor = priceMinor,
                 costMinor = costMinor,
                 isStockTracked = editor.isStockTracked,
+                reorderPoint = editor.reorderPoint,
                 isActive = editor.isActive,
                 barcodes = editor.barcodes,
                 conversions = editor.conversions,
@@ -378,6 +385,9 @@ class CatalogViewModel(
                 priceMinor = product.priceMinor,
                 costMinor = product.costMinor,
                 isStockTracked = product.isStockTracked,
+                // The threshold travels with the change for the same reason the pack sets do: this
+                // draft REPLACES the stored product, and activating an item must not lose its watch.
+                reorderPoint = product.reorderPoint,
                 isActive = active,
                 barcodes = productRepository.barcodes(product.id),
                 conversions = productRepository.conversions(product.id)

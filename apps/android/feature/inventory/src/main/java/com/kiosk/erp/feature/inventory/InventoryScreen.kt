@@ -153,6 +153,16 @@ fun InventoryScreen(vm: InventoryViewModel, onOpenCatalogue: () -> Unit = {}) {
         if (needle.isEmpty()) inTransit
         else inTransit.filter { it.name.contains(needle, ignoreCase = true) || it.sku.contains(needle, ignoreCase = true) }
     }
+    // Item 4.9: a breach is `balance <= threshold`, computed right here from the SAME cached
+    // balances the rows below read, so the shelf speaks while the phone is offline. A `null`
+    // quantity is "unknown", never zero, and a product nobody set a threshold on is never a breach.
+    val breached = remember(shown, quantityByProduct) {
+        shown.mapNotNull { product ->
+            val threshold = product.reorderPoint ?: return@mapNotNull null
+            val quantity = quantityByProduct[product.id] ?: return@mapNotNull null
+            if (quantity <= threshold) LowStockItem(product, quantity, threshold) else null
+        }
+    }
     val cachedAt = remember(balances) { balances.maxOfOrNull { it.updatedAtEpochMs } }
 
     Column(Modifier.fillMaxSize().padding(ScreenPadding)) {
@@ -245,6 +255,22 @@ fun InventoryScreen(vm: InventoryViewModel, onOpenCatalogue: () -> Unit = {}) {
                 contentPadding = PaddingValues(bottom = 24.dp),
                 modifier = Modifier.weight(1f),
             ) {
+                // The one sentence an owner needs on walking in: how many lines need buying, and
+                // which. The rows below carry the per-product state (item 4.9).
+                if (breached.isNotEmpty()) {
+                    item(key = "low-stock-banner") {
+                        Banner(
+                            message = buildString {
+                                append("${breached.size} product${if (breached.size == 1) "" else "s"} at or below the reorder point")
+                                breached.take(3).forEach {
+                                    append(" • ${it.product.name} ${Units.formatQuantity(it.quantity)} ${it.product.unit} (point ${Units.formatQuantity(it.threshold)})")
+                                }
+                                if (breached.size > 3) append(" • …")
+                            },
+                            tone = Tone.Warning,
+                        )
+                    }
+                }
                 items(shown, key = { it.id }) { product ->
                     StockRow(
                         product = product,
@@ -290,6 +316,9 @@ fun InventoryScreen(vm: InventoryViewModel, onOpenCatalogue: () -> Unit = {}) {
     }
 }
 
+/** One breached shelf (item 4.9): the product, what this branch holds, and where the line is. */
+private data class LowStockItem(val product: ProductEntity, val quantity: Double, val threshold: Double)
+
 @Composable
 private fun StockRow(product: ProductEntity, quantity: Double?, onHistory: () -> Unit, onAdjust: () -> Unit) {
     Card(Modifier.fillMaxWidth()) {
@@ -307,6 +336,17 @@ private fun StockRow(product: ProductEntity, quantity: Double?, onHistory: () ->
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                // Item 4.9. `quantity == null` is "not cached", not zero, so it never claims a
+                // breach; out of stock is its own state because it is its own emergency.
+                val threshold = product.reorderPoint
+                if (threshold != null && quantity != null && quantity <= threshold) {
+                    Spacer(Modifier.height(4.dp))
+                    if (quantity <= 0.0) {
+                        Pill("OUT OF STOCK", tone = Tone.Error)
+                    } else {
+                        Pill("LOW (≤ ${Units.formatQuantity(threshold)} ${product.unit})", tone = Tone.Warning)
+                    }
+                }
             }
             Column(horizontalAlignment = Alignment.End, modifier = Modifier.padding(horizontal = 8.dp)) {
                 Text(

@@ -555,6 +555,21 @@ private fun ProductEditorScreen(editor: ProductEditorState, meta: CatalogMeta, v
         SwitchRow("Tracks stock", "Off for services and fees that should not move stock.", editor.isStockTracked) { on ->
             vm.edit { it.copy(isStockTracked = on) }
         }
+        if (editor.isStockTracked) {
+            // Item 4.9: at or below this many BASE units the Stock screen starts flagging the
+            // shelf. Blank keeps the line unwatched — thresholds are opted into, product by product.
+            OutlinedTextField(
+                value = editor.reorderText,
+                onValueChange = { text -> vm.edit { it.copy(reorderText = text) } },
+                label = { Text("Reorder point (${editor.unit})") },
+                placeholder = { Text("e.g. 10 — blank = no alert") },
+                isError = editor.reorderInvalid,
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Spacer(Modifier.height(6.dp))
+        }
         SwitchRow("Active", "Inactive products stay on history but are hidden from the till.", editor.isActive) { on ->
             vm.edit { it.copy(isActive = on) }
         }

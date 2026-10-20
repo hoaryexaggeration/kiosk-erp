@@ -32,6 +32,11 @@ data class ProductEntity(
      * needed, available offline on the same pull that brings the pack sizes themselves.
      */
     val unitKind: String? = null,
+    /**
+     * Low-stock threshold in base units (item 4.9), or null when nobody is watching this line. It
+     * ships with the product so the Stock screen can flag the breach from its own cache, offline.
+     */
+    val reorderPoint: Double? = null,
     val isActive: Boolean = true,
 )
 

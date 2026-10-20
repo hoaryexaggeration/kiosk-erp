@@ -33,6 +33,8 @@ const CreateProductSchema = z.object({
   isStockTracked: z.boolean().optional(),
   priceMinor: z.number().int().nonnegative().optional(),
   costMinor: z.number().int().nonnegative().optional(),
+  /** Low-stock threshold in base units (item 4.9); absent or null means "no alert configured". */
+  reorderPoint: z.number().nonnegative().nullable().optional(),
   barcodes: z.array(z.string().min(1).max(64)).max(20).optional(),
   /** `1 <unit> = <factor> <unit>` pack sizes (item 4.6); absent means "no conversions". */
   conversions: ConversionSetSchema.optional(),
@@ -51,6 +53,11 @@ const UpdateProductSchema = z.object({
   isActive: z.boolean().optional(),
   priceMinor: z.number().int().nonnegative().optional(),
   costMinor: z.number().int().nonnegative().optional(),
+  /**
+   * Low-stock threshold in base units (item 4.9). Null clears one, absent keeps whatever is
+   * stored — clearing must be deliberate, not the side-effect of a client that never heard of it.
+   */
+  reorderPoint: z.number().nonnegative().nullable().optional(),
   /** The full desired barcode set for this product; the server replaces what is stored. */
   barcodes: z.array(z.string().min(1).max(64)).max(20).optional(),
   /** The full desired conversion set; the server replaces what is stored. Absent leaves it alone. */

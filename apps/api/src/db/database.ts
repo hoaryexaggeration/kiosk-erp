@@ -152,6 +152,8 @@ export interface ProductsTable {
   is_active: Generated<boolean>;
   price_minor: Generated<number>;
   cost_minor: Generated<number>;
+  /** Low-stock threshold in base units; null = no alert configured (item 4.9). */
+  reorder_point: number | null;
   version: Generated<number>;
   deleted_at: Date | null;
   updated_at: Generated<Date>;

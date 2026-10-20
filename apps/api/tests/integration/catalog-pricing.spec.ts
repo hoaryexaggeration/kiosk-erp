@@ -193,6 +193,57 @@ describe('catalogue + price resolution (Phase 4)', () => {
     expect(cleared.body.tax_rate_bp).toBe(0);
   });
 
+  it('carries a low-stock threshold through create, keep-on-absent and clear (item 4.9)', async () => {
+    const created = await auth(request(app.getHttpServer()).post('/v1/products')).send({
+      sku: 'PH4-REORDER-1',
+      name: 'Reorder point test tea',
+      priceMinor: 3000,
+      reorderPoint: 12.5,
+    });
+    expect(created.status).toBe(201);
+    expect(created.body.reorder_point).toBe(12.5);
+
+    // It ships with the catalogue: the device computes the breach from its own cache, offline.
+    const list = await auth(request(app.getHttpServer()).get('/v1/products'));
+    expect(list.status).toBe(200);
+    const fromList = list.body.products.find((p: { id: string }) => p.id === created.body.id);
+    expect(fromList.reorder_point).toBe(12.5);
+
+    // Absent keeps: an edit that knows nothing about thresholds must not wipe one.
+    const edited = await auth(request(app.getHttpServer()).patch(`/v1/products/${created.body.id}`)).send({
+      name: 'Reorder point test tea, 100g',
+      expectedVersion: created.body.version,
+    });
+    expect(edited.status).toBe(200);
+    expect(edited.body.reorder_point).toBe(12.5);
+
+    // Explicit null clears — clearing is a value, never an absence.
+    const cleared = await auth(request(app.getHttpServer()).patch(`/v1/products/${created.body.id}`)).send({
+      reorderPoint: null,
+      expectedVersion: edited.body.version,
+    });
+    expect(cleared.status).toBe(200);
+    expect(cleared.body.reorder_point).toBeNull();
+
+    const stillNull = await auth(request(app.getHttpServer()).patch(`/v1/products/${created.body.id}`)).send({
+      description: 'Nothing left to watch',
+      expectedVersion: cleared.body.version,
+    });
+    expect(stillNull.status).toBe(200);
+    expect(stillNull.body.reorder_point).toBeNull();
+  });
+
+  it('refuses a negative threshold the way it refuses a negative price (item 4.9)', async () => {
+    const res = await auth(request(app.getHttpServer()).post('/v1/products')).send({
+      sku: 'PH4-REORDER-2',
+      name: 'Negative threshold',
+      priceMinor: 100,
+      reorderPoint: -1,
+    });
+    expect(res.status).toBe(422);
+    expect(res.body).toMatchObject({ code: 'VALIDATION_ERROR' });
+  });
+
   it('pushes a product delta to devices as a server event', async () => {
     const events = await dbs.db
       .selectFrom('server_events')

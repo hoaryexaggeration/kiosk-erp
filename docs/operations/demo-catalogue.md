@@ -101,6 +101,11 @@ Prices and costs are shown in KES; the system stores integer minor units.
 20 products · 18 barcodes · 9 units · 3 brands · 4 pack conversions · 18 opening movements (one per
 product that was received).
 
+Five products carry a low-stock threshold (item 4.9): **SKU-005** (18 on hand, point 20),
+**SKU-013** (10, point 12) and **SKU-018** (8, point 10) breach on a fresh seed — the Stock screen
+opens with a banner naming them and a `LOW` pill on each row — while **SKU-004** (24, point 12) and
+**SKU-015** (40, point 15) sit watched-but-healthy, so the "watched, fine" state is visible too.
+
 ## What each awkward row is for
 
 | Row | Proves |
