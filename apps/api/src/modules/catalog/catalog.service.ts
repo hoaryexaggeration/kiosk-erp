@@ -3,6 +3,7 @@ import { Kysely, sql } from 'kysely';
 import { DbService } from '../../db/db.service';
 import { Database } from '../../db/database';
 import { EventsService } from '../platform/events.service';
+import { PricingService } from '../pricing/pricing.service';
 import { AppError } from '../../common/errors';
 import { newId } from '../../common/ids';
 import { parseCsv } from '../../domain/csv';
@@ -20,6 +21,16 @@ const isUniqueViolation = (err: unknown): boolean =>
 export interface ProductConversion {
   unit: string;
   factor: number;
+}
+
+/** One price-list row as devices cache it (item 4.11): dated, branch-scoped, ISO timestamps. */
+export interface ProductPriceOverridePayload {
+  id: string;
+  branch_id: string | null;
+  branch_name: string | null;
+  price_minor: number;
+  valid_from: string;
+  valid_to: string | null;
 }
 
 export interface CreateProductInput {
@@ -73,6 +84,7 @@ export class CatalogService {
   constructor(
     private readonly dbs: DbService,
     private readonly events: EventsService,
+    private readonly pricing: PricingService,
   ) {}
 
   /** The exact shape devices cache and that server events carry (keys match the client DTO). */
@@ -93,6 +105,7 @@ export class CatalogService {
         'products.price_minor',
         'products.cost_minor',
         'products.reorder_point',
+        'products.price_version',
         'products.is_stock_tracked',
         'products.is_active',
         'products.version',
@@ -109,6 +122,7 @@ export class CatalogService {
     // shop is offline needs the rule (`count` stays whole, a weigh may not) on the same payload that
     // brings the factor it is applying (item 4.6).
     const unitKind = await this.unitKindFor(trx, tenantId, row.unit);
+    const overrides = await this.overridesFor(trx, tenantId, [productId]);
     return {
       id: row.id,
       sku: row.sku,
@@ -127,6 +141,10 @@ export class CatalogService {
       // The threshold ships with the product (item 4.9): the device's Stock screen computes the
       // breach from cached balances while the shop is offline, so it needs this value locally.
       reorder_point: row.reorder_point === null ? null : Number(row.reorder_point),
+      // The price version and the price LISTS ride the same pull (item 4.11): the till snapshots
+      // the version it charged, and prices itself from these rows while offline.
+      price_version: row.price_version,
+      price_overrides: overrides.get(productId) ?? [],
       is_stock_tracked: row.is_stock_tracked,
       is_active: row.is_active,
       version: row.version,
@@ -141,6 +159,46 @@ export class CatalogService {
    * Barcodes keyed by product id. Devices cache these so a scan resolves offline (§6); the scan
    * path must never depend on the network.
    */
+  /**
+   * Price lists in bulk (item 4.11), the same way barcodes and pack sizes travel: the whole set
+   * per product, branch named, so a device computes the effective price for its own shelf and the
+   * current minute offline — scheduled flips included — instead of waiting for a push.
+   */
+  private async overridesFor(trx: Kysely<Database>, tenantId: string, productIds: string[]): Promise<Map<string, ProductPriceOverridePayload[]>> {
+    const grouped = new Map<string, ProductPriceOverridePayload[]>();
+    if (productIds.length === 0) return grouped;
+    const rows = await trx
+      .selectFrom('product_price_overrides')
+      .leftJoin('branches', 'branches.id', 'product_price_overrides.branch_id')
+      .select([
+        'product_price_overrides.id',
+        'product_price_overrides.product_id',
+        'product_price_overrides.branch_id',
+        'branches.name as branch_name',
+        'product_price_overrides.price_minor',
+        'product_price_overrides.valid_from',
+        'product_price_overrides.valid_to',
+      ])
+      .where('product_price_overrides.tenant_id', '=', tenantId)
+      .where('product_price_overrides.product_id', 'in', productIds)
+      .orderBy('product_price_overrides.valid_from', 'desc')
+      .execute();
+    for (const row of rows) {
+      const list = grouped.get(row.product_id) ?? [];
+      list.push({
+        id: row.id,
+        branch_id: row.branch_id,
+        branch_name: row.branch_name ?? null,
+        price_minor: Number(row.price_minor),
+        // ISO strings, because this payload is ALSO the sync event payload and JSON has no dates.
+        valid_from: row.valid_from.toISOString(),
+        valid_to: row.valid_to ? row.valid_to.toISOString() : null,
+      });
+      grouped.set(row.product_id, list);
+    }
+    return grouped;
+  }
+
   private async barcodesFor(trx: Kysely<Database>, tenantId: string, productIds: string[]): Promise<Map<string, string[]>> {
     const grouped = new Map<string, string[]>();
     if (productIds.length === 0) return grouped;
@@ -200,6 +258,7 @@ export class CatalogService {
         'products.price_minor',
         'products.cost_minor',
         'products.reorder_point',
+        'products.price_version',
         'products.version',
         'products.updated_at',
         'tax_categories.rate_bp as tax_rate_bp',
@@ -212,6 +271,7 @@ export class CatalogService {
     const rows = await query.orderBy('products.sku', 'asc').limit(limit).offset(offset).execute();
     const barcodes = await this.barcodesFor(this.dbs.db, tenantId, rows.map((r) => r.id));
     const conversions = await this.conversionsFor(this.dbs.db, tenantId, rows.map((r) => r.id));
+    const overrides = await this.overridesFor(this.dbs.db, tenantId, rows.map((r) => r.id));
     const unitKinds = await this.unitKindsFor(this.dbs.db, tenantId);
     return {
       products: rows.map((row) => ({
@@ -222,6 +282,7 @@ export class CatalogService {
         unit_kind: unitKinds.get(String(row.unit).trim().toLowerCase()) ?? null,
         barcodes: barcodes.get(row.id) ?? [],
         conversions: conversions.get(row.id) ?? [],
+        price_overrides: overrides.get(row.id) ?? [],
       })),
       limit,
       offset,
@@ -273,6 +334,16 @@ export class CatalogService {
           await this.replaceBarcodes(trx, tenantId, id, input.barcodes ?? []);
           // Absent means "no conversions wanted", which is exactly an empty set on a new product.
           if (input.conversions !== undefined) await this.writeConversions(trx, tenantId, id, conversions);
+          // A price that exists is a price that happened: the history starts at creation (item 4.11).
+          await this.pricing.recordPriceChange(trx, {
+            tenantId,
+            productId: id,
+            branchId: null,
+            oldPriceMinor: null,
+            newPriceMinor: input.priceMinor ?? 0,
+            source: 'edit',
+            actorId,
+          });
 
           return this.recordProductChange(trx, tenantId, actorId, correlationId, 'product.created', id);
         });
@@ -474,6 +545,10 @@ export class CatalogService {
       const conversions = desiredConversions === null ? null : await this.validateConversions(trx, tenantId, nextUnit, desiredConversions);
 
       const before = await this.productPayload(trx, tenantId, productId);
+      // A price edit is a versioned event (item 4.11): the version moves ONLY when the amount does,
+      // so a description typo cannot make a device's snapshotted price look stale, and a real
+      // change is answerable later without diffing amounts.
+      const priceChanged = input.priceMinor !== undefined && input.priceMinor !== Number(before.price_minor);
       await trx
         .updateTable('products')
         .set({
@@ -488,6 +563,7 @@ export class CatalogService {
           is_active: input.isActive ?? current.is_active,
           price_minor: input.priceMinor ?? current.price_minor,
           cost_minor: input.costMinor ?? current.cost_minor,
+          price_version: priceChanged ? Number(current.price_version) + 1 : current.price_version,
           // Absent keeps, explicit null clears — the same rule the brand and category follow.
           reorder_point: input.reorderPoint === undefined ? current.reorder_point : input.reorderPoint,
           version: current.version + 1,
@@ -500,6 +576,17 @@ export class CatalogService {
       if (input.barcodes !== undefined) await this.replaceBarcodes(trx, tenantId, productId, input.barcodes);
       // Same rule for conversions: present means replace (item 4.6).
       if (conversions !== null) await this.writeConversions(trx, tenantId, productId, conversions);
+      if (priceChanged) {
+        await this.pricing.recordPriceChange(trx, {
+          tenantId,
+          productId,
+          branchId: null,
+          oldPriceMinor: Number(before.price_minor),
+          newPriceMinor: Number(input.priceMinor),
+          source: 'edit',
+          actorId,
+        });
+      }
 
       return this.recordProductChange(trx, tenantId, actorId, correlationId, 'product.updated', productId, before);
     });
@@ -617,6 +704,7 @@ export class CatalogService {
             })
             .execute();
           if (row.barcodes) await this.replaceBarcodes(trx, tenantId, id, row.barcodes);
+          await this.pricing.recordPriceChange(trx, { tenantId, productId: id, branchId: null, oldPriceMinor: null, newPriceMinor: row.priceMinor, source: 'import', actorId });
           await this.recordProductChange(trx, tenantId, actorId, correlationId, 'product.created', id);
         } else {
           if (!row.productId) throw new Error('import planner produced an update without a product id');
@@ -642,6 +730,7 @@ export class CatalogService {
               is_active: row.isActive,
               price_minor: row.priceMinor,
               cost_minor: row.costMinor,
+              price_version: row.priceMinor !== Number(before.price_minor) ? Number(before.price_version) + 1 : Number(before.price_version),
               reorder_point: row.reorderPoint === undefined ? before.reorder_point : row.reorderPoint,
               version: Number((before as { version?: number }).version ?? 1) + 1,
               updated_at: new Date(),
@@ -650,6 +739,17 @@ export class CatalogService {
             .where('tenant_id', '=', tenantId)
             .execute();
           if (row.barcodes) await this.replaceBarcodes(trx, tenantId, row.productId, row.barcodes);
+          if (row.priceMinor !== Number(before.price_minor)) {
+            await this.pricing.recordPriceChange(trx, {
+              tenantId,
+              productId: row.productId,
+              branchId: null,
+              oldPriceMinor: Number(before.price_minor),
+              newPriceMinor: row.priceMinor,
+              source: 'import',
+              actorId,
+            });
+          }
           await this.recordProductChange(trx, tenantId, actorId, correlationId, 'product.updated', row.productId, before);
         }
       }

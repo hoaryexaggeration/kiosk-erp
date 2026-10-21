@@ -6,7 +6,9 @@ import com.kiosk.erp.core.common.Pricing
 import com.kiosk.erp.core.common.Units
 import com.kiosk.erp.core.data.repository.ProductRepository
 import com.kiosk.erp.core.data.session.SessionStore
+import com.kiosk.erp.core.database.BranchEntity
 import com.kiosk.erp.core.database.ProductEntity
+import com.kiosk.erp.core.database.ProductPriceOverrideEntity
 import com.kiosk.erp.core.network.ApiClient
 import com.kiosk.erp.core.network.ApiException
 import com.kiosk.erp.core.network.ImportReport
@@ -15,6 +17,7 @@ import com.kiosk.erp.core.network.ProductDraft
 import com.kiosk.erp.core.network.ServerBrand
 import com.kiosk.erp.core.network.ServerCategory
 import com.kiosk.erp.core.network.ServerConversion
+import com.kiosk.erp.core.network.ServerPriceHistoryEntry
 import com.kiosk.erp.core.network.ServerTaxCategory
 import com.kiosk.erp.core.network.ServerUnit
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -54,6 +57,20 @@ data class ProductEditorState(
     val conversions: List<ServerConversion> = emptyList(),
     val newConversionUnit: String = "",
     val newConversionFactor: String = "",
+    /** Price lists in force for this product (item 4.11), newest window first — from Room. */
+    val overrides: List<ProductPriceOverrideEntity> = emptyList(),
+    /** Who moved which price, when, and via what path (item 4.11) — from the server, best effort. */
+    val priceHistory: List<ServerPriceHistoryEntry> = emptyList(),
+    /** Cached branches, so a new row can name the shelf it applies to (item 4.11). */
+    val branchOptions: List<BranchEntity> = emptyList(),
+    /** This device's shelf (item 4.11): the preview prices FOR it, the way the till will. */
+    val deviceBranchId: String? = null,
+    /** The add-row form: a null branch means the tenant-wide list ("all branches"). */
+    val overrideBranchId: String? = null,
+    val overridePriceText: String = "",
+    val overrideFromText: String = "",
+    val overrideToText: String = "",
+    val overrideSaving: Boolean = false,
     val error: String? = null,
     val saving: Boolean = false,
 ) {
@@ -65,6 +82,16 @@ data class ProductEditorState(
     /** What the Save button will send: blank = null = "no watch"; junk blocks the save (item 4.9). */
     val reorderPoint: Double? get() = reorderText.trim().toDoubleOrNull()?.takeIf { it >= 0 && it.isFinite() }
     val reorderInvalid: Boolean get() = reorderText.isNotBlank() && reorderPoint == null
+    /** The add-row's own price/start parse; junk in a typed field blocks the button, not the API. */
+    val overridePriceMinor: Long? get() = Pricing.parseMinorInput(overridePriceText)
+    val overrideFromMs: Long? get() = Pricing.parseDateInput(overrideFromText)
+    val overrideToMs: Long? get() = if (overrideToText.isBlank()) null else Pricing.parseDateInput(overrideToText)
+    val overrideInvalid: Boolean get() =
+        (overridePriceText.isNotBlank() && overridePriceMinor == null) ||
+            (overrideFromText.isNotBlank() && overrideFromMs == null) ||
+            (overrideToText.isNotBlank() && overrideToMs == null)
+    val canAddOverride: Boolean get() =
+        !overrideSaving && id != null && overridePriceMinor != null && overrideFromMs != null && !overrideInvalid
     /**
      * The SKU is deliberately NOT part of validity: blank means "the server names it" on a new
      * product and "keep the current one" on an edit (scan-to-add, v0.4.9).
@@ -223,6 +250,16 @@ class CatalogViewModel(
         viewModelScope.launch {
             val barcodes = productRepository.barcodes(product.id)
             val conversions = productRepository.conversions(product.id)
+            // Price lists come from Room first, so the section renders offline; the history is a
+            // server read and quietly stays empty when the phone cannot reach it (item 4.11).
+            val overrides = productRepository.overrides(product.id)
+            val branches = productRepository.branches()
+            val session = sessionStore.current()
+            val history = if (session.isAuthenticated) {
+                runCatching { api.priceHistory(session.apiBaseUrl, session.accessToken!!, product.id) }.getOrNull() ?: emptyList()
+            } else {
+                emptyList()
+            }
             _editor.value = ProductEditorState(
                 id = product.id,
                 sku = product.sku,
@@ -240,6 +277,10 @@ class CatalogViewModel(
                 expectedVersion = product.version,
                 barcodes = barcodes,
                 conversions = conversions.map { ServerConversion(unit = it.unit, factor = it.factor) },
+                overrides = overrides,
+                priceHistory = history,
+                branchOptions = branches,
+                deviceBranchId = session.branchId,
             )
         }
     }
@@ -313,6 +354,91 @@ class CatalogViewModel(
     fun removeConversion(unit: String) {
         _editor.value = _editor.value?.let { state ->
             state.copy(conversions = state.conversions.filterNot { it.unit.equals(unit, ignoreCase = true) })
+        }
+    }
+
+    // --- price lists (item 4.11) ----------------------------------------------------------------
+
+    /**
+     * Add a price-list row on the SERVER first, then re-pull the list — the cached set is what a
+     * till prices its shelf from, so the screen must never show a row the server does not hold (or
+     * miss one it does). A blank "until" is an open window: "from Friday until I say otherwise".
+     */
+    fun saveOverride() {
+        val editor = _editor.value ?: return
+        val productId = editor.id ?: return
+        val priceMinor = editor.overridePriceMinor
+        val fromMs = editor.overrideFromMs
+        if (!editor.canAddOverride || priceMinor == null || fromMs == null) {
+            _editor.value = editor.copy(error = "A price list row needs a price and a start date (yyyy-MM-dd)")
+            return
+        }
+        val toMs = editor.overrideToMs
+        _editor.value = editor.copy(overrideSaving = true, error = null)
+        viewModelScope.launch {
+            val session = sessionStore.current()
+            if (!session.isAuthenticated) {
+                _editor.value = _editor.value?.copy(overrideSaving = false, error = "Sign in first (Setup) to change prices")
+                return@launch
+            }
+            runCatching {
+                api.savePriceOverride(
+                    baseUrl = session.apiBaseUrl,
+                    token = session.accessToken!!,
+                    overrideId = null,
+                    productId = productId,
+                    branchId = editor.overrideBranchId,
+                    priceMinor = priceMinor,
+                    validFromIso = java.time.Instant.ofEpochMilli(fromMs).toString(),
+                    validToIso = toMs?.let { java.time.Instant.ofEpochMilli(it).toString() },
+                )
+            }
+                .onSuccess {
+                    reloadPriceLists(productId)
+                    _editor.value = _editor.value?.copy(
+                        overrideSaving = false,
+                        overridePriceText = "",
+                        overrideFromText = "",
+                        overrideToText = "",
+                    )
+                    _meta.value = _meta.value.copy(message = "Price list row added", online = true)
+                }
+                .onFailure { failure ->
+                    _editor.value = _editor.value?.copy(overrideSaving = false, error = describe(failure))
+                    _meta.value = _meta.value.copy(online = false)
+                }
+        }
+    }
+
+    /** Removing a row is a price change too — the shelf falls back to the base price (item 4.11). */
+    fun deleteOverride(overrideId: String) {
+        val editor = _editor.value ?: return
+        val productId = editor.id ?: return
+        viewModelScope.launch {
+            val session = sessionStore.current()
+            if (!session.isAuthenticated) {
+                _editor.value = _editor.value?.copy(error = "Sign in first (Setup) to change prices")
+                return@launch
+            }
+            runCatching { api.deletePriceOverride(session.apiBaseUrl, session.accessToken!!, overrideId) }
+                .onSuccess {
+                    reloadPriceLists(productId)
+                    _meta.value = _meta.value.copy(message = "Price list row removed — that shelf falls back to the base price", online = true)
+                }
+                .onFailure { failure ->
+                    _editor.value = _editor.value?.copy(error = describe(failure))
+                    _meta.value = _meta.value.copy(online = false)
+                }
+        }
+    }
+
+    /** Re-pull the list after a write so Room and the screen agree with the server (item 4.11). */
+    private suspend fun reloadPriceLists(productId: String) {
+        val session = sessionStore.current()
+        val fresh = runCatching { api.priceOverrides(session.apiBaseUrl, session.accessToken!!, productId) }.getOrNull()
+        if (fresh != null) {
+            productRepository.replaceOverrides(productId, fresh)
+            _editor.value = _editor.value?.copy(overrides = productRepository.overrides(productId))
         }
     }
 

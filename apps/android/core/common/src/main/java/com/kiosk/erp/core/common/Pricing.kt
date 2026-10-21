@@ -26,6 +26,32 @@ object Pricing {
     /** Round half-up for non-negative values. */
     fun roundHalfUp(x: Double): Long = Math.floor(x + 0.5).toLong()
 
+    /**
+     * One price-list row as the pricing maths sees it (item 4.11) — kept in primitives so this
+     * object stays the dependency-free mirror of the server's resolution.
+     */
+    data class PriceWindow(
+        val branchId: String?,
+        val priceMinor: Long,
+        val validFromEpochMs: Long,
+        val validToEpochMs: Long?,
+    )
+
+    /**
+     * The effective list price for one shelf at one instant (item 4.11). Most specific scope wins
+     * — a row naming this branch beats the tenant-wide row — then the latest window start, exactly
+     * as the server sorts them, so a till prices itself offline the way the cloud would, and a
+     * scheduled flip takes over the moment its window opens with no push required.
+     */
+    fun effectiveListPrice(baseMinor: Long, windows: List<PriceWindow>, branchId: String?, asOfEpochMs: Long): Long {
+        val inForce = windows
+            .filter { window -> window.branchId == null || window.branchId == branchId }
+            .filter { window -> window.validFromEpochMs <= asOfEpochMs && (window.validToEpochMs == null || window.validToEpochMs > asOfEpochMs) }
+            .sortedWith(compareByDescending<PriceWindow> { it.branchId != null }.thenByDescending { it.validFromEpochMs })
+            .firstOrNull()
+        return inForce?.priceMinor ?: baseMinor
+    }
+
     fun computeLine(input: LineInput): LineResult {
         val gross = (input.unitPriceMinor.toDouble() * input.quantity)
         val discount = roundHalfUp(gross * input.discountBp / 10000.0)
@@ -99,5 +125,22 @@ object Pricing {
         } catch (_: NumberFormatException) {
             null
         }
+    }
+
+    /**
+     * Parse an operator-typed date for a price-list window (item 4.11): `yyyy-MM-dd` is taken as
+     * the start of that UTC day, a full ISO instant is taken as itself. Anything else is null —
+     * a window is never guessed from junk.
+     */
+    fun parseDateInput(text: String?): Long? {
+        val trimmed = text?.trim() ?: return null
+        if (trimmed.isEmpty()) return null
+        return runCatching {
+            if (Regex("^\\d{4}-\\d{2}-\\d{2}$").matches(trimmed)) {
+                java.time.LocalDate.parse(trimmed).atStartOfDay(java.time.ZoneOffset.UTC).toInstant().toEpochMilli()
+            } else {
+                java.time.Instant.parse(trimmed).toEpochMilli()
+            }
+        }.getOrNull()
     }
 }

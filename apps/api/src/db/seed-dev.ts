@@ -292,6 +292,44 @@ export async function seedDev(dbs: DbService): Promise<void> {
       }
     }
 
+    // Price lists (item 4.11): West prices its own shelf — oil at 330 there while Main keeps 320 —
+    // and one tenant-wide price is scheduled to take over on a date far enough out (2030) that the
+    // demo never flips on its own. Both also demonstrate that history is written with the change.
+    const demoOverrides = [
+      { id: 'cccc9999-9999-4999-8999-999999999991', productId: demoProductId(4), branchId: SEED.westBranchId, priceMinor: 33000, validFrom: new Date('2020-01-01T00:00:00.000Z') },
+      { id: 'cccc9999-9999-4999-8999-999999999992', productId: demoProductId(6), branchId: null, priceMinor: 22000, validFrom: new Date('2030-01-01T00:00:00.000Z') },
+    ];
+    for (const o of demoOverrides) {
+      await trx
+        .insertInto('product_price_overrides')
+        .values({
+          id: o.id,
+          tenant_id: SEED.tenantId,
+          product_id: o.productId,
+          branch_id: o.branchId,
+          price_minor: o.priceMinor,
+          valid_from: o.validFrom,
+          valid_to: null,
+          created_by: SEED.ownerId,
+        })
+        .onConflict((oc) => oc.column('id').doNothing())
+        .execute();
+      await trx
+        .insertInto('price_change_history')
+        .values({
+          id: `${o.id.slice(0, -1)}8`,
+          tenant_id: SEED.tenantId,
+          product_id: o.productId,
+          branch_id: o.branchId,
+          old_price_minor: null,
+          new_price_minor: o.priceMinor,
+          source: 'override',
+          actor_id: SEED.ownerId,
+        })
+        .onConflict((oc) => oc.column('id').doNothing())
+        .execute();
+    }
+
     // Chart of accounts (demo only; the real chart requires accountant sign-off).
     const coa = [
       ['1000', 'Cash', 'asset', false],

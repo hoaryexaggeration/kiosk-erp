@@ -76,9 +76,13 @@ import com.kiosk.erp.core.designsystem.ScreenPadding
 import com.kiosk.erp.core.designsystem.SectionTitle
 import com.kiosk.erp.core.designsystem.StackGap
 import com.kiosk.erp.core.designsystem.Tone
+import com.kiosk.erp.core.network.ServerPriceHistoryEntry
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 
 /** A row in a simple dropdown picker (Material3's exposed dropdown menu is still experimental). */
 private data class PickerOption(val label: String, val onClick: () -> Unit)
@@ -549,6 +553,142 @@ private fun ProductEditorScreen(editor: ProductEditorState, meta: CatalogMeta, v
             )
         }
 
+        // --- price lists (item 4.11) ------------------------------------------------------------
+        Spacer(Modifier.height(StackGap))
+        SectionTitle(
+            "Price lists",
+            caption = "One shelf may price differently, and a date may change it — the till reads these rows offline, not a push.",
+        )
+        Spacer(Modifier.height(4.dp))
+        if (editor.isNew) {
+            Hint("Save the product first — a price list is a row about a product that exists.")
+        } else {
+            // What THIS device's shelf charges today — computed by the same function the till will
+            // use, from the same cached rows, so the preview and the shelf cannot disagree (item 4.11).
+            val baseToday = editor.priceMinor
+            val effectiveToday = baseToday?.let { base ->
+                Pricing.effectiveListPrice(
+                    baseMinor = base,
+                    windows = editor.overrides.map {
+                        Pricing.PriceWindow(it.branchId, it.priceMinor, it.validFromEpochMs, it.validToEpochMs)
+                    },
+                    branchId = editor.deviceBranchId,
+                    asOfEpochMs = System.currentTimeMillis(),
+                )
+            }
+            if (baseToday != null && effectiveToday != null) {
+                val shelf = editor.deviceBranchId?.let { id -> editor.branchOptions.firstOrNull { it.id == id }?.name }
+                val where = shelf?.let { "Today at $it" } ?: "Today"
+                val words = if (effectiveToday != baseToday) {
+                    "$where: ${Pricing.formatMinor(effectiveToday)} — base price ${Pricing.formatMinor(baseToday)}"
+                } else {
+                    "$where: base price ${Pricing.formatMinor(baseToday)}"
+                }
+                Text(
+                    words,
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = if (effectiveToday != baseToday) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(6.dp))
+            }
+            if (editor.overrides.isEmpty()) {
+                Text(
+                    "No rows — every branch sells at the base price above.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            } else {
+                editor.overrides.forEach { row ->
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                "${Pricing.formatMinor(row.priceMinor)} · ${row.branchName ?: "All branches"}",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                            Text(
+                                priceWindowWords(row.validFromEpochMs, row.validToEpochMs),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        IconButton(onClick = { vm.deleteOverride(row.id) }) {
+                            Icon(Icons.Filled.Delete, contentDescription = "Remove this price list row")
+                        }
+                    }
+                }
+            }
+            Spacer(Modifier.height(6.dp))
+            PickerField(
+                label = "Applies to",
+                selectedLabel = editor.overrideBranchId
+                    ?.let { branchId -> editor.branchOptions.firstOrNull { it.id == branchId }?.name }
+                    ?: "All branches",
+                options = buildList {
+                    add(PickerOption("All branches") { vm.edit { it.copy(overrideBranchId = null) } })
+                    editor.branchOptions.forEach { branch ->
+                        add(PickerOption(branch.name) { vm.edit { it.copy(overrideBranchId = branch.id) } })
+                    }
+                },
+            )
+            Spacer(Modifier.height(4.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(StackGap)) {
+                OutlinedTextField(
+                    value = editor.overridePriceText,
+                    onValueChange = { text -> vm.edit { it.copy(overridePriceText = text) } },
+                    label = { Text("Price") },
+                    singleLine = true,
+                    isError = editor.overridePriceText.isNotBlank() && editor.overridePriceMinor == null,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    modifier = Modifier.weight(1f),
+                )
+                OutlinedTextField(
+                    value = editor.overrideFromText,
+                    onValueChange = { text -> vm.edit { it.copy(overrideFromText = text) } },
+                    label = { Text("From (yyyy-MM-dd)") },
+                    singleLine = true,
+                    isError = editor.overrideFromText.isNotBlank() && editor.overrideFromMs == null,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii),
+                    modifier = Modifier.weight(1f),
+                )
+                OutlinedTextField(
+                    value = editor.overrideToText,
+                    onValueChange = { text -> vm.edit { it.copy(overrideToText = text) } },
+                    label = { Text("Until (blank = open)") },
+                    singleLine = true,
+                    isError = editor.overrideToText.isNotBlank() && editor.overrideToMs == null,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii),
+                    modifier = Modifier.weight(1f),
+                )
+            }
+            Spacer(Modifier.height(6.dp))
+            Button(
+                onClick = { vm.saveOverride() },
+                enabled = editor.canAddOverride,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(if (editor.overrideSaving) "Saving…" else "Add price list row")
+            }
+            // Who moved which price, and when (§3.C): the trail the exit criterion asks for.
+            if (editor.priceHistory.isNotEmpty()) {
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    "Price history",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Spacer(Modifier.height(2.dp))
+                editor.priceHistory.take(8).forEach { entry ->
+                    Text(
+                        priceHistoryWords(entry),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+
         Spacer(Modifier.height(StackGap))
         SectionTitle("Stock & status")
         Spacer(Modifier.height(6.dp))
@@ -633,6 +773,32 @@ private fun SwitchRow(title: String, subtitle: String, checked: Boolean, onChang
         }
         Switch(checked = checked, onCheckedChange = onChange)
     }
+}
+
+private val priceListDateFormat: DateTimeFormatter = DateTimeFormatter.ofPattern("d MMM yyyy", java.util.Locale.getDefault())
+
+/** `from 1 Jan 2026 · open-ended`, or `from 1 Jan 2026 until 30 Apr 2026` (item 4.11). */
+private fun priceWindowWords(fromMs: Long, toMs: Long?): String {
+    val zone = ZoneId.systemDefault()
+    val from = Instant.ofEpochMilli(fromMs).atZone(zone).toLocalDate().format(priceListDateFormat)
+    val until = toMs?.let { Instant.ofEpochMilli(it).atZone(zone).toLocalDate().format(priceListDateFormat) }
+    return if (until == null) "from $from · open-ended" else "from $from until $until"
+}
+
+/** One history line: `65.00 → 70.00 · edit · by Owner · 21 Oct 2026` (item 4.11). */
+private fun priceHistoryWords(entry: ServerPriceHistoryEntry): String {
+    val day = Instant.ofEpochMilli(entry.changedAtEpochMs).atZone(ZoneId.systemDefault()).toLocalDate().format(priceListDateFormat)
+    val old = entry.oldPriceMinor?.let { "${Pricing.formatMinor(it)} → " } ?: ""
+    val via = when (entry.source) {
+        "edit" -> "edit"
+        "import" -> "import"
+        "override" -> "price list"
+        "override_removed" -> "list row removed"
+        else -> entry.source
+    }
+    val branch = entry.branchName?.let { " · $it" } ?: ""
+    val by = entry.actorName?.let { " · by $it" } ?: ""
+    return "${old}${Pricing.formatMinor(entry.newPriceMinor)} · $via$branch$by · $day"
 }
 
 @Composable

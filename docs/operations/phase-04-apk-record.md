@@ -5,13 +5,13 @@ Required by §15 "Mandatory Android APK delivery gate". Every field below is par
 | Field | Value |
 |---|---|
 | **Phase** | 4 — Catalogue, pricing/promotions and inventory (+ post-phase polish) |
-| **App version** | `0.4.10` (versionCode 410) |
-| **Artifact** | `artifacts/retail-erp-p04-v0.4.10.apk` |
-| **SHA-256** | `b6637e087792e7a9d086067d2d2001651156f9b4281dcd7b6e849f93a72df3f7` |
-| **Size** | ~42.4 MB (42,411,193 bytes; bundled ML Kit barcode models, unminified debug build) |
+| **App version** | `0.4.11` (versionCode 411) |
+| **Artifact** | `artifacts/retail-erp-p04-v0.4.11.apk` |
+| **SHA-256** | `b51076a30aa66e7d56f2e539281031f850c6c15b91084a2539580cbc5b503872` |
+| **Size** | ~42.4 MB (42,427,577 bytes; bundled ML Kit barcode models, unminified debug build) |
 | **Signing** | **Stable internal-test key** (`CN=Kiosk ERP Internal Test`, cert SHA-256 `935c0fbc6993db9ca761b4c3610c71a50d91897fd9b1753d0da3e56dffd056dd`), generated once by `build-apk.sh` and git-ignored (ADR 0005) |
-| **Build** | Docker image `kiosk-erp-android-builder` (JDK 17 + Android SDK 34 + Gradle 8.7); `PHASE=04 VERSION=0.4.10 bash infra/docker/android/build-apk.sh` |
-| **Expected backend** | `apps/api` on `http://<host>:3000/v1` with migration `0007`; seed tenant + **two** branches (Main Kiosk, and West Kiosk — item 4.7's second shelf) and a 20-product demo catalogue with 9 units, 3 brands, 4 pack sizes and 5 low-stock thresholds — see `demo-catalogue.md` |
+| **Build** | Docker image `kiosk-erp-android-builder` (JDK 17 + Android SDK 34 + Gradle 8.7); `PHASE=04 VERSION=0.4.11 bash infra/docker/android/build-apk.sh` |
+| **Expected backend** | `apps/api` on `http://<host>:3000/v1` with migration `0008`; seed tenant + **two** branches (Main Kiosk, and West Kiosk — item 4.7's second shelf) and a 20-product demo catalogue with 9 units, 3 brands, 4 pack sizes, 5 low-stock thresholds and 2 price lists — see `demo-catalogue.md` |
 
 **Build history inside Phase 4** (each is signed with the same stable key, so each upgrades in place):
 
@@ -27,6 +27,7 @@ Required by §15 "Mandatory Android APK delivery gate". Every field below is par
 | `0.4.8` | 408 | `fc2002a0de9dca37` | Stocktakes (4.8): count sheet with pack pills and variance in words, counted-not-delta payloads, `Stock count` + who did it in history |
 | `0.4.9` | 409 | `c34727167daf71e3` | Scan-to-add a product (auto SKU) + physical-phone setup guidance |
 | `0.4.10` | 410 | `b6637e087792e7a9` | Low-stock thresholds (4.9): reorder point on the product, Stock-screen breach banner + `LOW`/`OUT` pills computed offline, editor field, bulk-set via import |
+| `0.4.11` | 411 | `b51076a30aa66e7d` | Price lists (4.11): dated branch-scoped overrides, scheduled flips computed offline on the device, `price_version`, price-change history in the editor, stale-price warnings widened to every source |
 
 > **Upgrade note.** Phase 3's APK was signed with the throwaway Android debug key, so it **cannot be
 > upgraded in place** by this build (signature mismatch) — uninstall the Phase 3 build first. This is
@@ -434,24 +435,67 @@ Android:
   rows read, so it all works with the radio off. A product with no threshold gets no pill; silence
   is absence, never a green tick.
 
+**v0.4.11 — price lists, scheduled prices and price-change history (item 4.11, D5).**
+
+Server (`apps/api`):
+
+- **Migration `0008`**: `product_price_overrides` (dated, `branch_id` null = tenant-wide list,
+  otherwise that shelf only; `valid_from` inclusive, `valid_to` exclusive, null = open-ended) and
+  `products.price_version`, which moves only when the base price amount does — a description typo
+  cannot make a device's snapshotted price look stale.
+- **Resolution** (`PricingService.resolvePrice`, now branch-aware): the override in force wins by
+  most specific scope, then latest window, and promotions figure on that effective list price.
+  `GET /v1/pricing/resolve` takes `branchId` and reports the source (`list | override |
+  promotion`).
+- **Price lists API**: `GET/POST/PATCH/DELETE /v1/pricing/overrides` (`catalog.manage`), and
+  `GET /v1/pricing/history` reads the new append-only `price_change_history` — every write
+  (create, `edit`, `import`, `override`, `override_removed`) lands in the SAME transaction as the
+  change itself, with the actor recorded.
+- **Product payload**: `price_version` and the whole `price_overrides` set ride every product pull
+  and event, exactly like barcodes and pack sizes — so a device computes the effective price for
+  its own shelf and the current minute offline, and a scheduled flip needs no push at all.
+- **Stale prices are flagged, not fixed**: sale posting now re-resolves each line for the sale's
+  BRANCH at the sale's own timestamp, and any charged/policy amount mismatch — promotion,
+  scheduled flip, branch row, or plain base move — produces a `STALE_PRICE_SNAPSHOT` warning.
+  The receipt is never silently re-priced; a stale edit is still a 409.
+- **Tests**: new `price-overrides.spec.ts` (8 tests: branch vs base, window edge at the second,
+  branch beats tenant-wide, version only on the price, import history, the override lifecycle
+  with removal history, the stale-price warning on a real sale, and every refusal) —
+  **171/171 across 15 suites**.
+
+Android:
+
+- **Room v7** (`MIGRATION_6_7`): `ProductPriceOverrideEntity` + `ProductEntity.priceVersion`,
+  replaced as SETs from the product list, the save response and product events.
+- **Catalogue editor — *Price lists* section**: the rows (price · shelf · window words) with
+  delete, an add form (All branches or a cached branch, price, `yyyy-MM-dd` start, optional end),
+  a **today-preview computed by `Pricing.effectiveListPrice`** — the very function the till will
+  call ("Today at West Kiosk: 330.00 — base price 320.00") — and the latest **price history**
+  entries (`65.00 → 70.00 · edit · by Owner · 21 Oct 2026`).
+- After any list write the editor re-pulls the list, so what the till would price from is never a
+  screen that disagrees with the server.
+
 ## Verification
 
 - `npm run verify` (fixtures + API tests): **74/74** domain-fixture checks (pricing, money parsing and
-  the unit-conversion vectors) and **163/163 API tests** across 14 suites — auth, catalog-import
+  the unit-conversion vectors) and **171/171 API tests** across 15 suites — auth, catalog-import
   **(+2: thresholds set/kept/cleared through the column, invalid value refused)**, catalog-pricing
   **(13: catalogue exports, optimistic-concurrency create/update, barcodes, tax category, auto-SKU
   generation ×3, explicit duplicate refused, blank edit keeps the SKU, low-stock threshold round
-  trip + negative refused, promotions)**, inventory, licensing, opening-stock-import, sync-sale,
-  units-conversions, **transfers (18: both halves end to end, the conservation and cost claims,
-  every refusal, branch scoping, numbering, idempotent replay)**, **stocktake (11: reason + actor
-  movements, silent agreement, FIFO loss on a zero count, pack vs base variances, refused
-  non-numbers, unknown lines, replay, `FORBIDDEN`, uncosted review with a durable conflict case)**,
-  plus the `product-import`, `opening-stock-import`, `unit-conversion` and `domain-fixtures` unit
-  suites — against Docker Postgres.
+  trip + negative refused, promotions)**, **price-overrides (8: branch override vs base, scheduled
+  window edge, branch beats tenant-wide, price-only versioning, import history, override lifecycle
+  incl. removal history, stale-price warning on a real sale, refusals incl. cashier `403`)**,
+  inventory, licensing, opening-stock-import, sync-sale, units-conversions, **transfers (18: both
+  halves end to end, the conservation and cost claims, every refusal, branch scoping, numbering,
+  idempotent replay)**, **stocktake (11: reason + actor movements, silent agreement, FIFO loss on a
+  zero count, pack vs base variances, refused non-numbers, unknown lines, replay, `FORBIDDEN`,
+  uncosted review with a durable conflict case)**, plus the `product-import`,
+  `opening-stock-import`, `unit-conversion` and `domain-fixtures` unit suites — against Docker
+  Postgres.
 - `tsc -p tsconfig.build.json --noEmit`: clean.
 - `seed:dev` run twice against a freshly migrated database: **20 products / 18 barcodes / 9 units /
-  3 brands / 4 pack conversions / 18 opening movements / 2 branches** both times — the demo catalogue
-  is still idempotent, and the suites above run against it.
+  3 brands / 4 pack conversions / 18 opening movements / 2 branches / 2 price lists** both times —
+  the demo catalogue is still idempotent, and the suites above run against it.
 - Docker APK build across **14** Gradle modules: clean, **zero Kotlin warnings**. Verified with a full
   `clean assembleDebug` run under `--no-build-cache`, so every module's Kotlin compile actually
   executed — a build-cache hit replays no output and would have hidden any warning.
@@ -527,6 +571,10 @@ Android:
 | 40 | Catalogue: open Pishori rice 2kg → *Reorder point (ea)* shows `20`; change it to `5` and save → the Stock banner and the row's pill are gone (18 > 5); set it back to `20` → the pill returns after **Refresh from server** (or immediately in the cached view) | ☐ |
 | 41 | Catalogue: clear a product's reorder point (blank field) and save → the row shows no pill; typing junk (e.g. `abc`) disables **Save**; deactivate/reactivate a watched product → its threshold is still there afterwards | ☐ |
 | 42 | Catalogue → Import: commit a CSV with a `reorder_point` column (values + one blank cell) → the thresholds land on those products; re-import the same file **without** the column → stored thresholds survive; a blank cell in a present column clears its threshold | ☐ |
+| 43 | Catalogue → open **Sunflower oil 1L (SKU-004)** → *Price lists* shows the seeded row `330.00 · West Kiosk` with its window, the preview reads *Today at Main Kiosk: base price 320.00* (this device's shelf — a West row does not touch Main), and **Price history** lists the earlier price edits with actor and date | ☐ |
+| 44 | Same editor: pick **Applies to → All branches**, price `325`, *From* `yyyy-MM-dd` (today), *Until* blank → **Add price list row** → the row appears, the preview flips to *Today: 325.00 — base price 320.00*; **Refresh from server** and reopen → still there; delete it → preview returns to 320.00 and a `list row removed` line lands in the history | ☐ |
+| 45 | Catalogue → **Maize flour 2kg (SKU-006)** → a tenant-wide row `220.00` scheduled from `2030-01-01` is listed with its window and the preview stays on the base price (the window has not opened — a scheduled price must not bite early); typing junk in the *Price* or *From* field disables **Add price list row** and shows the error state | ☐ |
+| 46 | Edit a product's base price and save → *Price history* gains a `… → … · edit · by Owner` line; with the radio off, the *Price lists* section and its preview still render (Room), while the history simply stays at what it last fetched | ☐ |
 
 A failure involving lost transactions, duplicate posting, corrupted local data or a false
 payment/tax status blocks the phase.

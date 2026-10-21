@@ -154,6 +154,8 @@ export interface ProductsTable {
   cost_minor: Generated<number>;
   /** Low-stock threshold in base units; null = no alert configured (item 4.9). */
   reorder_point: number | null;
+  /** Moves only when the BASE price moves — the version a sale snapshot attaches (item 4.11). */
+  price_version: Generated<number>;
   version: Generated<number>;
   deleted_at: Date | null;
   updated_at: Generated<Date>;
@@ -234,6 +236,30 @@ export interface PromotionsTable {
   ends_at: Date | null;
   is_active: Generated<boolean>;
   created_at: Generated<Date>;
+}
+/** A dated, optionally branch-scoped price list row (item 4.11). `branch_id` null = every branch. */
+export interface ProductPriceOverridesTable {
+  id: Generated<string>;
+  tenant_id: string;
+  product_id: string;
+  branch_id: string | null;
+  price_minor: number;
+  valid_from: Date;
+  valid_to: Date | null;
+  created_by: string;
+  created_at: Generated<Date>;
+}
+/** Append-only record of every price write (item 4.11, §3.C "price change history"). */
+export interface PriceChangeHistoryTable {
+  id: Generated<string>;
+  tenant_id: string;
+  product_id: string;
+  branch_id: string | null;
+  old_price_minor: number | null;
+  new_price_minor: number;
+  source: string;
+  actor_id: string | null;
+  changed_at: Generated<Date>;
 }
 export interface StockBalancesTable {
   tenant_id: string;
@@ -578,6 +604,8 @@ export interface Database {
   stock_locations: StockLocationsTable;
   inventory_movements: InventoryMovementsTable;
   promotions: PromotionsTable;
+  product_price_overrides: ProductPriceOverridesTable;
+  price_change_history: PriceChangeHistoryTable;
   stock_balances: StockBalancesTable;
   inventory_valuation_layers: InventoryValuationLayersTable;
   inventory_cost_allocations: InventoryCostAllocationsTable;

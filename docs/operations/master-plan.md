@@ -27,7 +27,7 @@ Status key: ✅ present · 🟡 partial · ❌ absent.
 | 1 | Domain contracts, data model, sync spec | 🟡 | Fixtures, sync protocol, posting matrix, ADRs, UoM/pack-size contract (`units-and-conversions.md`) exist; **no OpenAPI skeleton, no ERD, no state machines beyond `Sale`, no event-version policy** |
 | 2 | Backend foundation and cloud controls | 🟡 | NestJS + Postgres + auth/RBAC + devices + licensing + outbox work; **no CI, no staging deploy, no backups/restore drill, no OpenAPI generation, no rate limits, `LicenseBillingModule` absent** |
 | 3 | Native shell, local DB, sync center | 🟡 | Shell, Room, push/pull, Sync Center, enrolment work; **`LicenseManager` request export (`.licreq`/QR), entitlement display, Keystore installation key, replay/rollback detection, app lock/offline expiry absent** |
-| 4 | Catalogue, pricing, inventory ledger | 🟡 | Products/barcodes/tax/categories/promotions + movement ledger + balances work; product CRUD UI, category/units/brands/tax management, bulk import, opening-stock import and movement history UI all in; units + pack conversions + brands now hold one base-unit ledger; cross-branch transfers (dispatch/receipt/discrepancy) move goods under one document; stocktakes turn a shelf reading into movements with reason and actor; low-stock thresholds flag a breached shelf on the device, offline; **no price lists/scheduled prices, no variants, no supplier product codes** |
+| 4 | Catalogue, pricing, inventory ledger | ✅ | All §15 items 4.0–4.11 delivered: products/barcodes/tax/categories/promotions + movement ledger + balances; product CRUD UI, category/units/brands/tax management, bulk import, opening-stock import and movement history UI; units + pack conversions + brands on one base-unit ledger; cross-branch transfers (dispatch/receipt/discrepancy) under one document; stocktakes that turn a shelf reading into movements with reason and actor; low-stock thresholds flagged on the device, offline; price lists that price one shelf differently or change on a date, versioned and historical. (Variants and supplier product codes are later-phase scope, not Phase 4 gaps.) Owner phone checklist (`phase-04-apk-record.md`) pending |
 | 5 | Offline POS vertical slice | 🟡 | Search, scan, cart, offline cash sale, outbox, idempotent posting work; **no cashier session/role gate, no discounts UI, no price override, no customer on sale, no split tender, no hold/resume, no void, no receipt rendering/printing, no sales-history screen** |
 | 6 | Cash, shifts, refunds, end-of-day | ❌ | `cash_sessions`/`cash_movements` tables only; no float, count, variance, approval, shift close, returns/refunds/exchange |
 | 7 | Customers, suppliers, debtors, creditors | ❌ | `customers`/`suppliers`/`customer_ledger_entries` tables only; no modules, no UI, no credit policy |
@@ -118,7 +118,7 @@ must be completed when its target phase is reached.
 | D4b | Brands (`brands`, `products.brand_id`) | §3.C | 4 | ✔ |
 | D4c | Supplier product codes on the catalogue — needs the Supplier module, so it lands with it | §3.C | 7 | ☐ |
 | D4d | Product **variants** (size/flavour/colour as distinct sellable items) — needs its own exit criterion agreed **before Phase 5 starts**, because variants change what the till resolves a barcode to | §3.C | 4 (before Ph5) | ☐ |
-| D5 | Price lists, branch/customer/scheduled prices, price-change history | §3.C | 4 | ☐ |
+| D5 | Price lists, branch/customer/scheduled prices, price-change history | §3.C | 4 | ◐ per-branch + scheduled lists + history shipped in 4.11; customer/wholesale-specific prices wait for Phase 7 customers |
 | D6 | Stock transfers with dispatch/receipt states | §3.D, §15 Ph4 | 4 ✔ | ✔ |
 | D7 | Stocktake / cycle count | §3.D, §15 Ph4 | 4 ✔ | ✔ |
 | D7a | Stock valuation is **FIFO with valuation layers** (ADR 0009), replacing weighted average | §7, §18.5 | 4 ✔ | ✔ |
@@ -171,7 +171,7 @@ each later phase is expanded to the same granularity as it becomes current.
 | 4.8 ✔ | Stocktake / cycle count (D7) | Done: the device sends **counted** quantities (never deltas) and the server derives each variance against its own book — agreement writes **nothing**, disagreement writes one movement with `reason: 'stocktake'` and the actor on it; short variances book FIFO cost, found stock opens a layer at the last known cost; pack counts land as the pack only when the variance divides exactly; `quantity >= 0` means a count can never need the negative-stock override; `inventory.adjust`, one `Stocktake` outbox command (offline), uncosted shortages → `review_required` + `UNCOSTED_STOCK`; device: Stock → Stocktake count sheet with pack pills, variance **in words**, `Stock count` + `by <name>` in history; 74/74 fixtures + 156/156 API tests; `stocktake-count.md` |
 | 4.9 ✔ | Low-stock thresholds and alerts (D8) | Done: `products.reorder_point` (nullable ≥0, base units, tenant-wide on the shared catalogue — the breach itself is per-branch, computed on the device from cached balances so it shows offline); NULL = "no alert configured"; Stock banner names the breached lines and each row carries `LOW (≤ n unit)` / `OUT OF STOCK`; editor field under Stock & status (tracked products only); import column `reorder_point` with the barcode-style carve-out (omitted column leaves stored thresholds alone, blank cell clears); push delivery stays a later phase; 163/163 API tests; `low-stock.md` |
 | 4.10 ✔ | Movement history UI per product/location (D8) | Done: per-product history in the Stock tab (source, signed quantity, reason, date, COGS); reads the server ledger |
-| 4.11 | Price lists / branch prices / scheduled prices + price-change history (D5) | A price change is versioned; a stale device price is flagged, never silently overwritten |
+| 4.11 ✔ | Price lists / branch prices / scheduled prices + price-change history (D5) | Done: `product_price_overrides` (dated, branch-scoped or tenant-wide; most specific scope wins, then latest window) + `products.price_version` (moves only with the price) + append-only `price_change_history` written in the write's own transaction; rows ride the product payload so a till prices its shelf offline and scheduled flips need no push; stale device price at posting = `STALE_PRICE_SNAPSHOT` warning on any source, receipt never silently re-priced; override CRUD + history API + editor UI with today-preview; customer/wholesale prices stay with Phase 7; 171/171 API tests; `price-lists.md` |
 
 #### UI usability pass (v0.4.3, between 4.4 and 4.5)
 
@@ -434,6 +434,42 @@ no threshold gets no pill — silence is stated by absence, never by a green tic
 - Push-notification alerts ("tell me the moment stock breaches") and per-branch min/max levels with
   replenishment suggestions remain later phases; dashboards will aggregate this same flag (§3.D).
 - Documented in `docs/operations/low-stock.md`; 163/163 API tests across 14 suites, 74/74 fixtures.
+
+#### Price lists, scheduled prices and price-change history (v0.4.11, item 4.11)
+
+The catalogue keeps ONE base price; a price LIST (`product_price_overrides`, migration `0008`)
+answers both §3.C questions with one mechanism: a dated, optionally **branch-scoped** override of
+it. `branch_id` set = "West sells oil at 330 while Main keeps 320" (ADR 0008: prices are one of
+the few per-branch facts); `branch_id` null = the tenant-wide list; the window (`valid_from`
+inclusive, `valid_to` exclusive, null = open-ended) = "from Friday, sugar is 190". Resolution:
+most specific scope wins, then the latest window, then the existing promotion layer figures on
+that effective list price. `GET /v1/pricing/resolve` takes `branchId` and `asOf` and reports
+*where* the price came from.
+
+The rows ride the product payload and events like barcodes and pack sizes, so a device computes
+the effective price for its own shelf and the current minute **from Room, offline** — a scheduled
+flip takes over with no push, which is the §1.6 promise kept for pricing. Android mirrors the
+server's sort in `Pricing.effectiveListPrice`, and the editor's *Price lists* section shows the
+preview ("Today at West Kiosk: 330.00 — base price 320.00") computed by the very function the
+till (Phase 5) will call.
+
+Versioning and the stale price — the item's exit criterion:
+
+- `products.price_version` moves **only when the base price amount does** — a description typo
+  cannot make a device's snapshotted price look stale.
+- Every price write lands in append-only `price_change_history` **in the write's own
+  transaction**: creates, `edit`, `import`, `override`, and `override_removed` (a deleted row is a
+  price change too — the shelf falls back to the base). `GET /v1/pricing/history` reads it back
+  with actor names; the editor lists the latest entries.
+- Posting a sale re-resolves each line for **that branch, as of the sale's own timestamp**, and a
+  charged/policy amount mismatch — promotion, scheduled flip, branch row, or base — becomes a
+  `STALE_PRICE_SNAPSHOT` warning. The receipt is never silently re-priced (§13); an edit with a
+  stale `expectedVersion` is a 409, so a stale device cannot overwrite either.
+
+Customer-specific and wholesale/quantity-break prices stay with Phase 7 (the resolver already
+takes `quantity` for the hook); till-side `priceSnapshotVersion` attachment ships with the till
+in Phase 5. Documented in `docs/operations/price-lists.md`; 8 tests in `price-overrides.spec.ts`
+— **171/171 across 15 suites**.
 
 ### Phase 5 — Offline POS vertical slice (current phase)
 

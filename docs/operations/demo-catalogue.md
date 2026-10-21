@@ -106,6 +106,12 @@ Five products carry a low-stock threshold (item 4.9): **SKU-005** (18 on hand, p
 opens with a banner naming them and a `LOW` pill on each row — while **SKU-004** (24, point 12) and
 **SKU-015** (40, point 15) sit watched-but-healthy, so the "watched, fine" state is visible too.
 
+Two price lists (item 4.11) make the pricing layer visible without a calendar surprise:
+**SKU-004** sunflower oil has a West-Kiosk row at 330.00 (Main keeps the base 320.00 — the
+catalogue product editor shows *Today at West Kiosk: 330.00 — base price 320.00*), and **SKU-006**
+maize flour carries a tenant-wide 220.00 scheduled from 2030-01-01, so a "scheduled price" row
+exists in every demo without the demo ever flipping on its own.
+
 ## What each awkward row is for
 
 | Row | Proves |

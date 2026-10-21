@@ -31,6 +31,17 @@ interface ProductDao {
     @Query("DELETE FROM barcodes WHERE productId = :productId")
     suspend fun deleteBarcodesFor(productId: String)
 
+    /** Price lists for one product (item 4.11), newest window first. */
+    @Query("SELECT * FROM product_price_overrides WHERE productId = :productId ORDER BY validFromEpochMs DESC")
+    suspend fun overridesFor(productId: String): List<ProductPriceOverrideEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertOverrides(overrides: List<ProductPriceOverrideEntity>)
+
+    /** Same SET rule as barcodes: a list row the server no longer reports stops pricing here. */
+    @Query("DELETE FROM product_price_overrides WHERE productId = :productId")
+    suspend fun deleteOverridesFor(productId: String)
+
     @Query("SELECT barcode FROM barcodes WHERE productId = :productId ORDER BY barcode ASC")
     suspend fun barcodesFor(productId: String): List<String>
 
@@ -226,6 +237,10 @@ interface TransferDao {
 interface BranchDao {
     @Query("SELECT * FROM branches ORDER BY name ASC")
     fun observeAll(): Flow<List<BranchEntity>>
+
+    /** A one-shot read (item 4.11): the price-list editor names a shelf without collecting a flow. */
+    @Query("SELECT * FROM branches ORDER BY name ASC")
+    suspend fun all(): List<BranchEntity>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertAll(branches: List<BranchEntity>)

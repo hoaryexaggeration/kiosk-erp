@@ -127,14 +127,16 @@ export class SaleService {
     const nonTrackedCostMinor = lineRows.filter((l) => !l.stockTracked).reduce((s, l) => s + l.costMinor, 0);
     let saleCogsMinor = 0;
 
-    // --- price-snapshot review (dated promotions, §13 pricing snapshots) --------------
-    // We keep the sale-time price the till actually charged and only flag divergence; we never
-    // silently re-price a completed sale.
+    // --- price-snapshot review (dated promotions + price lists, §13 pricing snapshots) -----
+    // We keep the sale-time price the till actually charged and only flag divergence — whatever
+    // moved underneath it (a promotion, a scheduled list flip, a branch price, the base price).
+    // The branch is stated because a shelf prices itself: a device that was offline during a price
+    // change must be FLAGGED here, not silently re-priced (item 4.11, architecture line 394).
     const priceAsOf = sale.clientCreatedAt ? new Date(sale.clientCreatedAt) : new Date();
     for (const l of lineRows) {
       if (!l.productId) continue;
-      const resolved = await this.pricing.resolvePrice(trx, ctx.tenantId, l.productId, l.quantity, priceAsOf);
-      if (resolved && resolved.source === 'promotion' && resolved.unitPriceMinor !== l.unitPriceMinor) {
+      const resolved = await this.pricing.resolvePrice(trx, ctx.tenantId, l.productId, l.quantity, priceAsOf, ctx.branchId);
+      if (resolved && resolved.unitPriceMinor !== l.unitPriceMinor) {
         warnings.push(`STALE_PRICE_SNAPSHOT ${l.sku}: charged ${l.unitPriceMinor}, policy ${resolved.unitPriceMinor}`);
       }
     }

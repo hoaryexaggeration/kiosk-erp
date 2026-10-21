@@ -69,6 +69,13 @@ data class ServerProduct(
     val unitKind: String? = null,
     /** Low-stock threshold in base units (item 4.9); null = nobody is watching this line. */
     val reorderPoint: Double? = null,
+    /**
+     * The version of the BASE price (item 4.11). It moves only when the price amount does, so a
+     * till snapshot can say WHICH price it charged without a description edit invalidating it.
+     */
+    val priceVersion: Int = 1,
+    /** Price lists in force for this product (item 4.11) — the device prices itself offline. */
+    val priceOverrides: List<ServerPriceOverride> = emptyList(),
     /** The full set the server reports for this product — replaced into the cache as a SET. */
     val conversions: List<ServerConversion> = emptyList(),
     val isStockTracked: Boolean = true,
@@ -76,6 +83,34 @@ data class ServerProduct(
 )
 
 data class ServerCategory(val id: String, val name: String, val parentId: String? = null)
+
+/**
+ * One price-list row as the server reports it (item 4.11): dated and optionally branch-scoped. A
+ * till keeps these with the product so the shelf prices itself offline — a scheduled flip takes
+ * over the moment its window opens, with no push required.
+ */
+data class ServerPriceOverride(
+    val id: String,
+    /** Null = the tenant-wide list (every branch); otherwise exactly this shelf. */
+    val branchId: String? = null,
+    val branchName: String? = null,
+    val priceMinor: Long,
+    /** Epoch millis (the wire format is ISO-8601). */
+    val validFromEpochMs: Long,
+    /** Exclusive window end; null = open-ended ("until I say otherwise"). */
+    val validToEpochMs: Long? = null,
+)
+
+/** One entry of the price-change history (item 4.11): old → new, who, when, and via what path. */
+data class ServerPriceHistoryEntry(
+    val id: String,
+    val branchName: String? = null,
+    val oldPriceMinor: Long?,
+    val newPriceMinor: Long,
+    val source: String,
+    val actorName: String? = null,
+    val changedAtEpochMs: Long,
+)
 
 data class ServerTaxCategory(val id: String, val name: String, val rateBp: Int, val inclusive: Boolean)
 
@@ -365,6 +400,16 @@ class ApiClient {
         }
     }
 
+    private fun delete(baseUrl: String, path: String, token: String?): JsonElement {
+        val builder = Request.Builder().url(url(baseUrl, path)).delete()
+        if (token != null) builder.header("authorization", "Bearer $token")
+        client.newCall(builder.build()).execute().use { response ->
+            val text = response.body?.string() ?: ""
+            if (!response.isSuccessful) throw parseError(response.code, text)
+            return if (text.isBlank()) JsonObject(emptyMap()) else json.parseToJsonElement(text)
+        }
+    }
+
     private fun parseError(status: Int, text: String): ApiException {
         val code = runCatching { json.parseToJsonElement(text).jsonObject["code"]?.jsonPrimitive?.content }.getOrNull() ?: "HTTP_$status"
         val message = runCatching { json.parseToJsonElement(text).jsonObject["message"]?.jsonPrimitive?.content }.getOrNull() ?: text
@@ -459,6 +504,82 @@ class ApiClient {
         val body = productBody(draft, forCreate = creating)
         val response = if (creating) post(baseUrl, path, token, body) else patch(baseUrl, path, token, body)
         response.jsonObject.toServerProduct()
+    }
+
+    /** An ISO-8601 instant from the server → epoch millis; garbage becomes null, never a guess. */
+    private fun parseInstantEpochMs(iso: String): Long? = runCatching { java.time.Instant.parse(iso).toEpochMilli() }.getOrNull()
+
+    /** One product's price lists (item 4.11), newest window first. */
+    suspend fun priceOverrides(baseUrl: String, token: String, productId: String): List<ServerPriceOverride> = withContext(Dispatchers.IO) {
+        val response = get(baseUrl, "pricing/overrides?productId=$productId", token).jsonObject
+        response["overrides"]?.jsonArray?.mapNotNull { element ->
+            val row = element.jsonObject
+            val id = row["id"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+            val price = row["price_minor"]?.jsonPrimitive?.content?.toLongOrNull() ?: return@mapNotNull null
+            val from = row["valid_from"]?.jsonPrimitive?.contentOrNull?.let(::parseInstantEpochMs) ?: return@mapNotNull null
+            ServerPriceOverride(
+                id = id,
+                branchId = row["branch_id"]?.jsonPrimitive?.contentOrNull,
+                branchName = row["branch_name"]?.jsonPrimitive?.contentOrNull,
+                priceMinor = price,
+                validFromEpochMs = from,
+                validToEpochMs = row["valid_to"]?.jsonPrimitive?.contentOrNull?.let(::parseInstantEpochMs),
+            )
+        } ?: emptyList()
+    }
+
+    /**
+     * Create or replace a price-list row (item 4.11). `validFrom`/`validTo` travel as ISO-8601
+     * instants, exactly as the server stores windows; an open end is an explicit JSON null.
+     */
+    suspend fun savePriceOverride(
+        baseUrl: String,
+        token: String,
+        overrideId: String?,
+        productId: String,
+        branchId: String?,
+        priceMinor: Long,
+        validFromIso: String,
+        validToIso: String?,
+    ): String = withContext(Dispatchers.IO) {
+        val body = buildJsonObject {
+            if (overrideId == null) put("productId", productId)
+            put("branchId", branchId)
+            put("priceMinor", priceMinor)
+            put("validFrom", validFromIso)
+            put("validTo", validToIso)
+        }
+        if (overrideId == null) {
+            post(baseUrl, "pricing/overrides", token, body).jsonObject["id"]?.jsonPrimitive?.content ?: ""
+        } else {
+            patch(baseUrl, "pricing/overrides/$overrideId", token, body)
+            overrideId
+        }
+    }
+
+    suspend fun deletePriceOverride(baseUrl: String, token: String, overrideId: String): Unit = withContext(Dispatchers.IO) {
+        delete(baseUrl, "pricing/overrides/$overrideId", token)
+        Unit
+    }
+
+    /** Price-change history (item 4.11), newest first — who moved which price, and via what. */
+    suspend fun priceHistory(baseUrl: String, token: String, productId: String): List<ServerPriceHistoryEntry> = withContext(Dispatchers.IO) {
+        val response = get(baseUrl, "pricing/history?productId=$productId", token).jsonObject
+        response["history"]?.jsonArray?.mapNotNull { element ->
+            val row = element.jsonObject
+            val id = row["id"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+            val newPrice = row["newPriceMinor"]?.jsonPrimitive?.content?.toLongOrNull() ?: return@mapNotNull null
+            val changedAt = row["changedAt"]?.jsonPrimitive?.contentOrNull?.let(::parseInstantEpochMs) ?: return@mapNotNull null
+            ServerPriceHistoryEntry(
+                id = id,
+                branchName = row["branchName"]?.jsonPrimitive?.contentOrNull,
+                oldPriceMinor = row["oldPriceMinor"]?.jsonPrimitive?.contentOrNull?.toLongOrNull(),
+                newPriceMinor = newPrice,
+                source = row["source"]?.jsonPrimitive?.contentOrNull ?: "",
+                actorName = row["actorName"]?.jsonPrimitive?.contentOrNull,
+                changedAtEpochMs = changedAt,
+            )
+        } ?: emptyList()
     }
 
     suspend fun categories(baseUrl: String, token: String): List<ServerCategory> = withContext(Dispatchers.IO) {
@@ -622,6 +743,21 @@ class ApiClient {
         unitKind = this["unit_kind"]?.jsonPrimitive?.contentOrNull,
         // JSON null and a missing key both mean "no threshold" — contentOrNull swallows JsonNull.
         reorderPoint = this["reorder_point"]?.jsonPrimitive?.contentOrNull?.toDoubleOrNull(),
+        priceVersion = this["price_version"]?.jsonPrimitive?.content?.toIntOrNull() ?: 1,
+        priceOverrides = this["price_overrides"]?.jsonArray?.mapNotNull { element ->
+            val row = element.jsonObject
+            val id = row["id"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+            val price = row["price_minor"]?.jsonPrimitive?.content?.toLongOrNull() ?: return@mapNotNull null
+            val from = row["valid_from"]?.jsonPrimitive?.contentOrNull?.let(::parseInstantEpochMs) ?: return@mapNotNull null
+            ServerPriceOverride(
+                id = id,
+                branchId = row["branch_id"]?.jsonPrimitive?.contentOrNull,
+                branchName = row["branch_name"]?.jsonPrimitive?.contentOrNull,
+                priceMinor = price,
+                validFromEpochMs = from,
+                validToEpochMs = row["valid_to"]?.jsonPrimitive?.contentOrNull?.let(::parseInstantEpochMs),
+            )
+        } ?: emptyList(),
         conversions = this["conversions"]?.jsonArray?.mapNotNull { element ->
             val conversion = element.jsonObject
             val unit = conversion["unit"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null

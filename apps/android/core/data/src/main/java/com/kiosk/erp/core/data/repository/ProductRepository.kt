@@ -2,10 +2,13 @@ package com.kiosk.erp.core.data.repository
 
 import androidx.room.withTransaction
 import com.kiosk.erp.core.database.BarcodeEntity
+import com.kiosk.erp.core.database.BranchEntity
 import com.kiosk.erp.core.database.KioskDatabase
 import com.kiosk.erp.core.database.ProductConversionEntity
 import com.kiosk.erp.core.database.ProductEntity
+import com.kiosk.erp.core.database.ProductPriceOverrideEntity
 import com.kiosk.erp.core.network.ServerConversion
+import com.kiosk.erp.core.network.ServerPriceOverride
 import com.kiosk.erp.core.network.ServerProduct
 import kotlinx.coroutines.flow.Flow
 import kotlinx.serialization.json.JsonObject
@@ -51,6 +54,7 @@ class ProductRepository(private val db: KioskDatabase) {
             for (p in products) {
                 replaceBarcodes(p.id, p.barcodes)
                 replaceConversions(p.id, p.conversions)
+                replaceOverrides(p.id, p.priceOverrides)
             }
         }
     }
@@ -61,8 +65,15 @@ class ProductRepository(private val db: KioskDatabase) {
             db.productDao().upsertAll(listOf(product.toEntity()))
             replaceBarcodes(product.id, product.barcodes)
             replaceConversions(product.id, product.conversions)
+            replaceOverrides(product.id, product.priceOverrides)
         }
     }
+
+    /** This product's price lists as cached (item 4.11), newest window first. */
+    suspend fun overrides(productId: String): List<ProductPriceOverrideEntity> = db.productDao().overridesFor(productId)
+
+    /** Cached branches, for naming a price list's shelf in the editor (item 4.11). */
+    suspend fun branches(): List<BranchEntity> = db.branchDao().all()
 
     /** Apply a `product.created` / `product.updated` server event to the local cache (delta sync). */
     suspend fun applyProductEvent(obj: JsonObject) {
@@ -76,6 +87,20 @@ class ProductRepository(private val db: KioskDatabase) {
             val factor = conversion["factor"]?.jsonPrimitive?.content?.toDoubleOrNull() ?: return@mapNotNull null
             ServerConversion(unit = unit, factor = factor)
         } ?: emptyList()
+        val overrides = obj["price_overrides"]?.jsonArray?.mapNotNull { element ->
+            val row = element.jsonObject
+            val overrideId = row["id"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+            val price = row["price_minor"]?.jsonPrimitive?.content?.toLongOrNull() ?: return@mapNotNull null
+            val from = row["valid_from"]?.jsonPrimitive?.contentOrNull?.let(::parseInstantEpochMs) ?: return@mapNotNull null
+            ServerPriceOverride(
+                id = overrideId,
+                branchId = row["branch_id"]?.jsonPrimitive?.contentOrNull,
+                branchName = row["branch_name"]?.jsonPrimitive?.contentOrNull,
+                priceMinor = price,
+                validFromEpochMs = from,
+                validToEpochMs = row["valid_to"]?.jsonPrimitive?.contentOrNull?.let(::parseInstantEpochMs),
+            )
+        } ?: emptyList()
         db.withTransaction {
             db.productDao().upsertAll(
                 listOf(
@@ -86,6 +111,9 @@ class ProductRepository(private val db: KioskDatabase) {
                         unit = obj["unit"]?.jsonPrimitive?.content ?: "ea",
                         priceMinor = obj["price_minor"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0L,
                         costMinor = obj["cost_minor"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0L,
+                        // Which price the server believes is current (item 4.11) — the till's
+                        // snapshot attaches this, and only a real price move bumps it.
+                        priceVersion = obj["price_version"]?.jsonPrimitive?.content?.toIntOrNull() ?: 1,
                         taxRateBp = obj["tax_rate_bp"]?.jsonPrimitive?.content?.toIntOrNull() ?: 0,
                         taxInclusive = obj["tax_inclusive"]?.jsonPrimitive?.content?.toBooleanStrictOrNull() ?: false,
                         isStockTracked = obj["is_stock_tracked"]?.jsonPrimitive?.content?.toBooleanStrictOrNull() ?: true,
@@ -106,8 +134,12 @@ class ProductRepository(private val db: KioskDatabase) {
             )
             replaceBarcodes(id, barcodes)
             replaceConversions(id, conversions)
+            replaceOverrides(id, overrides)
         }
     }
+
+    /** An ISO-8601 instant from the server → epoch millis; garbage becomes null, never a guess. */
+    private fun parseInstantEpochMs(iso: String): Long? = runCatching { java.time.Instant.parse(iso).toEpochMilli() }.getOrNull()
 
     /** Delete-then-insert so the stored set is exactly what the server reports. */
     private suspend fun replaceBarcodes(productId: String, barcodes: List<String>) {
@@ -127,6 +159,30 @@ class ProductRepository(private val db: KioskDatabase) {
         }
     }
 
+    /**
+     * Same SET rule for price lists (item 4.11): a row the server no longer reports stops pricing.
+     * Public because the editor re-pulls the list straight after a write, so what the till would
+     * price from is never a screen that lies about what the server now holds.
+     */
+    suspend fun replaceOverrides(productId: String, overrides: List<ServerPriceOverride>) {
+        db.productDao().deleteOverridesFor(productId)
+        if (overrides.isNotEmpty()) {
+            db.productDao().upsertOverrides(
+                overrides.map {
+                    ProductPriceOverrideEntity(
+                        id = it.id,
+                        productId = productId,
+                        branchId = it.branchId,
+                        branchName = it.branchName,
+                        priceMinor = it.priceMinor,
+                        validFromEpochMs = it.validFromEpochMs,
+                        validToEpochMs = it.validToEpochMs,
+                    )
+                },
+            )
+        }
+    }
+
     private fun ServerProduct.toEntity() = ProductEntity(
         id = id,
         sku = sku,
@@ -134,6 +190,7 @@ class ProductRepository(private val db: KioskDatabase) {
         unit = unit,
         priceMinor = priceMinor,
         costMinor = costMinor,
+        priceVersion = priceVersion,
         taxRateBp = taxRateBp,
         taxInclusive = taxInclusive,
         isStockTracked = isStockTracked,

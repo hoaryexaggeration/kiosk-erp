@@ -13,6 +13,12 @@ data class ProductEntity(
     val unit: String,
     val priceMinor: Long,
     val costMinor: Long,
+    /**
+     * The version of the BASE price (item 4.11): it moves only when the price amount does, so a
+     * till snapshot can say which price it charged and a description edit cannot make it look
+     * stale. Mirrors `products.price_version`.
+     */
+    val priceVersion: Int = 1,
     val taxRateBp: Int,
     val taxInclusive: Boolean,
     val isStockTracked: Boolean,
@@ -219,3 +225,21 @@ data class StockTransferLineEntity(
     val shortage: Double,
 )
 
+/**
+ * One price-list row (item 4.11): dated, optionally branch-scoped, riding the same pull as the
+ * product so a till prices its own shelf offline — a scheduled flip takes over the moment its
+ * window opens, with no push required. `branchId` null is the tenant-wide list.
+ */
+@Entity(tableName = "product_price_overrides")
+data class ProductPriceOverrideEntity(
+    @PrimaryKey val id: String,
+    val productId: String,
+    val branchId: String? = null,
+    /** Denormalised so a list can name the shelf without a join (like `brandName`). */
+    val branchName: String? = null,
+    val priceMinor: Long,
+    /** Window start (inclusive), epoch millis. */
+    val validFromEpochMs: Long,
+    /** Window end (exclusive); null = open-ended. */
+    val validToEpochMs: Long? = null,
+)

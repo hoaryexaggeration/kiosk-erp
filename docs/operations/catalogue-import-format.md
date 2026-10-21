@@ -50,6 +50,11 @@ Prices never pass through binary floating point. `1.15` becomes 115 minor units,
 what `parseFloat("1.15") * 100` gives). More than two decimals is **rejected** rather than quietly
 rounded — quietly rounding someone's typed price is a money error.
 
+A `price` that actually changes moves the product's `price_version` and writes an `import` row
+into the price-change history, in the same transaction — a bulk price move is as traceable as a
+single edit (see `price-lists.md`). Branch-scoped or dated price LISTS are deliberately not part
+of the file: too dimensional for one CSV column; they are managed per product or via the API.
+
 ### Tax must already exist
 
 A tax rate is money. If a file references a tax category that does not exist, that row is an error

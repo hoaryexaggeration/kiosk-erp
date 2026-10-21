@@ -16,6 +16,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         ProductEntity::class,
         BarcodeEntity::class,
         ProductConversionEntity::class,
+        ProductPriceOverrideEntity::class,
         SaleEntity::class,
         SaleLineEntity::class,
         TenderEntity::class,
@@ -26,7 +27,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         StockTransferLineEntity::class,
         BranchEntity::class,
     ],
-    version = 6,
+    version = 7,
     exportSchema = false,
 )
 abstract class KioskDatabase : RoomDatabase() {
@@ -61,7 +62,7 @@ abstract class KioskDatabase : RoomDatabase() {
 
         fun build(context: Context): KioskDatabase =
             Room.databaseBuilder(context, KioskDatabase::class.java, "kiosk-erp.db")
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7)
                 .fallbackToDestructiveMigrationOnDowngrade()
                 .build()
 
@@ -159,6 +160,27 @@ abstract class KioskDatabase : RoomDatabase() {
         val MIGRATION_5_6 = object : Migration(5, 6) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("ALTER TABLE `products` ADD COLUMN `reorderPoint` REAL")
+            }
+        }
+
+        /**
+         * v6 → v7 carries the price LISTS (item 4.11): the base price's version (which price did I
+         * charge) and the dated, branch-scoped rows a till prices itself from, offline.
+         */
+        val MIGRATION_6_7 = object : Migration(6, 7) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `products` ADD COLUMN `priceVersion` INTEGER NOT NULL DEFAULT 1")
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `product_price_overrides` (" +
+                        "`id` TEXT NOT NULL, " +
+                        "`productId` TEXT NOT NULL, " +
+                        "`branchId` TEXT, " +
+                        "`branchName` TEXT, " +
+                        "`priceMinor` INTEGER NOT NULL, " +
+                        "`validFromEpochMs` INTEGER NOT NULL, " +
+                        "`validToEpochMs` INTEGER, " +
+                        "PRIMARY KEY(`id`))",
+                )
             }
         }
     }
