@@ -83,6 +83,9 @@ class SettingsViewModel(
                 // Re-login bound to the device so queued commands carry the device id.
                 step("Finishing…")
                 val bound = api.login(base, s.email.trim(), s.password, s.deviceId.trim())
+                // Cache the role's permission codes so the till can gate itself offline (item 5.2).
+                // Best effort: setup must not fail over a courtesy the server enforces anyway.
+                val permissions = runCatching { api.authMe(base, bound.accessToken) }.getOrNull() ?: emptyList()
                 sessionStore.save(
                     Session(
                         apiBaseUrl = base,
@@ -93,6 +96,7 @@ class SettingsViewModel(
                         email = s.email.trim(),
                         deviceId = s.deviceId.trim(),
                         branchId = s.branchId.trim(),
+                        permissions = permissions.toSet(),
                     ),
                 )
                 saleRepository.ensureSyncState()

@@ -98,6 +98,100 @@ fun PosScreen(vm: PosViewModel, onOpenCatalogue: () -> Unit = {}) {
         )
         Spacer(Modifier.height(StackGap))
 
+        // The drawer gate (item 5.2, D10) — stated where the cashier stands, not buried in a
+        // settings screen: a till with no open drawer cannot record a sale at all.
+        val drawer by vm.drawer.collectAsState()
+        var showOpen by remember { mutableStateOf(false) }
+        var showClose by remember { mutableStateOf(false) }
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            if (drawer != null) {
+                Text(
+                    "Drawer open · float ${Pricing.formatMinor(drawer!!.openingFloatMinor)} KES",
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                TextButton(onClick = { showClose = true }) { Text("Close drawer") }
+            } else {
+                Text(
+                    "Drawer closed — a sale cannot be recorded",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.error,
+                )
+                Button(onClick = { showOpen = true }) { Text("Open drawer") }
+            }
+        }
+        if (showOpen) {
+            var floatText by remember { mutableStateOf("") }
+            val floatMinor = Pricing.parseMinorInput(floatText)
+            AlertDialog(
+                onDismissRequest = { showOpen = false },
+                title = { Text("Open the drawer") },
+                text = {
+                    Column {
+                        Text("Count the starting float. Money is exact — up to two decimals, never rounded for you.")
+                        Spacer(Modifier.height(8.dp))
+                        OutlinedTextField(
+                            value = floatText,
+                            onValueChange = { floatText = it },
+                            label = { Text("Opening float (KES)") },
+                            singleLine = true,
+                            isError = floatText.isNotBlank() && floatMinor == null,
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
+                },
+                confirmButton = {
+                    Button(
+                        onClick = {
+                            showOpen = false
+                            vm.openDrawer(floatMinor ?: 0L)
+                        },
+                        enabled = floatMinor != null,
+                    ) { Text("Open") }
+                },
+                dismissButton = { TextButton(onClick = { showOpen = false }) { Text("Cancel") } },
+            )
+        }
+        if (showClose) {
+            var countedText by remember { mutableStateOf("") }
+            val countedMinor = Pricing.parseMinorInput(countedText)
+            AlertDialog(
+                onDismissRequest = { showClose = false },
+                title = { Text("Close the drawer") },
+                text = {
+                    Column {
+                        Text("Count the cash in the drawer. The count is a reading — the server derives expected and variance itself.")
+                        Spacer(Modifier.height(8.dp))
+                        OutlinedTextField(
+                            value = countedText,
+                            onValueChange = { countedText = it },
+                            label = { Text("Counted cash (KES)") },
+                            singleLine = true,
+                            isError = countedText.isNotBlank() && countedMinor == null,
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
+                },
+                confirmButton = {
+                    Button(
+                        onClick = {
+                            showClose = false
+                            vm.closeDrawer(countedMinor ?: 0L)
+                        },
+                        enabled = countedMinor != null,
+                    ) { Text("Close") }
+                },
+                dismissButton = { TextButton(onClick = { showClose = false }) { Text("Cancel") } },
+            )
+        }
+        Spacer(Modifier.height(StackGap))
+
         Row(horizontalArrangement = Arrangement.spacedBy(StackGap)) {
             ToggleButton("Find items", selected = !showCart, onClick = { showCart = false }, modifier = Modifier.weight(1f))
             ToggleButton("Cart (${cart.size})", selected = showCart, onClick = { showCart = true }, modifier = Modifier.weight(1f))

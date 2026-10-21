@@ -17,8 +17,12 @@ export interface SaleApplyContext {
 }
 
 export interface SaleApplyResult {
-  status: 'accepted' | 'review_required';
+  /** `rejected` exists since item 5.2: a sale with no valid drawer behind it is refused outright, not parked. */
+  status: 'accepted' | 'review_required' | 'rejected';
   result: Record<string, unknown>;
+  /** Promoted to the push result so the device can show WHY a sale bounced (item 5.2, §6). */
+  code?: string;
+  message?: string;
   conflictCodes: string[];
 }
 
@@ -56,6 +60,56 @@ export class SaleService {
       .executeTakeFirst();
     if (!branch) {
       return { status: 'review_required', result: { code: 'DELETED_REFERENCE', message: 'Branch not found' }, conflictCodes: ['DELETED_REFERENCE'] };
+    }
+
+    // --- drawer gate (item 5.2, D10) -------------------------------------------------------------
+    // A sale must belong to the drawer it was rung up on, and that drawer must have been open
+    // at the moment the sale was TAKEN — offline sales arrive long after the drawer closes, so
+    // posting time proves nothing and the till's own clock (clientCreatedAt) is the reference,
+    // exactly as the stale-price check uses it. The till enqueues its session-open command
+    // before any sale, so a session that has not landed at all means a genuinely invalid sale
+    // (an old client, or a lost command): rejecting it names the fix, retrying cannot help.
+    const session = await trx
+      .selectFrom('cash_sessions')
+      .select(['id', 'branch_id', 'opened_at', 'closed_at', 'state'])
+      .where('id', '=', sale.cashSessionId)
+      .where('tenant_id', '=', ctx.tenantId)
+      .executeTakeFirst();
+    if (!session) {
+      return {
+        status: 'rejected',
+        result: { code: 'SESSION_REQUIRED', saleId: sale.id, cashSessionId: sale.cashSessionId },
+        code: 'SESSION_REQUIRED',
+        message: `This sale names drawer session ${sale.cashSessionId}, which does not exist on the server — open the drawer at the till and sync`,
+        conflictCodes: [],
+      };
+    }
+    if (session.branch_id !== ctx.branchId) {
+      return {
+        status: 'rejected',
+        result: { code: 'SESSION_BRANCH_MISMATCH', saleId: sale.id, cashSessionId: sale.cashSessionId },
+        code: 'SESSION_BRANCH_MISMATCH',
+        message: 'That drawer session belongs to another branch',
+        conflictCodes: [],
+      };
+    }
+    const saleAt = sale.clientCreatedAt ? new Date(sale.clientCreatedAt) : new Date();
+    const afterOpen = saleAt.getTime() >= session.opened_at.getTime();
+    const beforeClose = session.closed_at === null || saleAt.getTime() <= session.closed_at.getTime();
+    if (!afterOpen || !beforeClose) {
+      return {
+        status: 'rejected',
+        result: {
+          code: 'SESSION_NOT_OPEN',
+          saleId: sale.id,
+          saleTakenAt: saleAt.toISOString(),
+          sessionOpenedAt: session.opened_at.toISOString(),
+          sessionClosedAt: session.closed_at ? session.closed_at.toISOString() : null,
+        },
+        code: 'SESSION_NOT_OPEN',
+        message: `The drawer was not open when this sale was taken (${saleAt.toISOString()}): it ran from ${session.opened_at.toISOString()} to ${session.closed_at ? session.closed_at.toISOString() : 'now'}`,
+        conflictCodes: [],
+      };
     }
 
     // --- resolve product snapshots & compute authoritative line figures -------------

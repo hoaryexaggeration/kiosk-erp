@@ -12,6 +12,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
@@ -65,7 +66,15 @@ class SyncViewModel(
             val session = sessionStore.current()
             val branchId = session.branchId ?: "22222222-2222-4222-8222-222222222222"
             val deviceId = session.deviceId ?: "00000000-0000-4000-8000-000000000000"
+            // Item 5.2: a sale belongs to a drawer, diagnostics or not — the server refuses one
+            // that does not, so route the test sale through the open drawer like any other.
+            val drawer = saleRepository.observeOpenSession(branchId).first()
+            if (drawer == null) {
+                _message.value = "Open the drawer at the till first — a diagnostics sale needs one too (item 5.2)."
+                return@launch
+            }
             val result = saleRepository.createCashSale(
+                cashSessionId = drawer.id,
                 customerId = null,
                 lines = listOf(CartLine(null, "TEST-001", "Offline test item", "ea", 1.0, 1000, 0, 1600, true)),
                 branchId = branchId,

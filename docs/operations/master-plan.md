@@ -126,7 +126,7 @@ must be completed when its target phase is reached.
 | D7c | Branch edge gateway (ADR 0010) — new MVP component | §6, §17 | 5–11 | ☐ |
 | D8 | Low-stock/reorder thresholds + alerts | §3.D | 4 | ✔ (in-app alerts on the Stock screen; push delivery is a later phase) |
 | D9 | Editing barcodes on an existing product (`PATCH /v1/products/:id`) | §3.C | 4 ✔ | ✔ |
-| D10 | Cashier session + role gate on the till | §15 Ph5 | 5 | ☐ |
+| D10 | Cashier session + role gate on the till | §15 Ph5 | 5 | ✔ drawer opens/closes offline as server-refereed commands; sale requires a valid open session; offline role gate from cached permissions (v0.5.0) |
 | D11 | Discounts (line/order), price override with permission, customer on sale, notes | §3.B, §15 Ph5 | 5 | ☐ |
 | D12 | Held/resumed sales and void-before-finalisation | §15 Ph5 | 5 | ☐ |
 | D13 | Receipt rendering + printing adapter, local receipt state labels | §15 Ph5 | 5 | ☐ |
@@ -476,7 +476,7 @@ in Phase 5. Documented in `docs/operations/price-lists.md`; 8 tests in `price-ov
 | # | Item | Exit criterion |
 |---|---|---|
 | 5.1 | Barcode scanning offline (**done**) | Scan resolves from Room with no network |
-| 5.2 | Cashier session + role/permission gate on the till (D10) | A sale cannot be recorded without an open cashier session |
+| 5.2 ✔ | Cashier session + role/permission gate on the till (D10) | Done: the drawer opens and closes at the till OFFLINE as `CashSessionOpen`/`CashSessionClose` commands (Room `cash_sessions`, MIGRATION_7_8) that the server referees on landing — one open drawer per branch (`SESSION_ALREADY_OPEN` conflict, never a silent pick), server-derived expected cash at close (float + cash tendered; `variance = counted − expected` audited with the actor, a count is a reading); every sale now REQUIRES `cashSessionId` and is re-checked against the drawer's window on the sale's own clock (`SESSION_REQUIRED` / `SESSION_BRANCH_MISMATCH` / `SESSION_NOT_OPEN`, each with a promoted code + human message, and no half-applied effect); the till gates itself offline on the cached permission set (`pos.sale.create`, `cash.shift.open/close` from `/auth/me`) while the server re-checks every one on push; 10 tests in `cashier-session.spec.ts` + both sale suites reworked; `cashier-sessions.md` |
 | 5.2a | Till refuses a sale that would take stock below zero (D7b, ADR 0009) | A cashier cannot oversell; the message names the item and the shortfall |
 | 5.3 | Quantity/weight entry with unit conversion at the till | Selling 0.5 kg decrements the correct base quantity |
 | 5.4 | Line and order discounts, with permission for overrides (D11) | Discounts are snapshotted on the line/document |
@@ -488,6 +488,36 @@ in Phase 5. Documented in `docs/operations/price-lists.md`; 8 tests in `price-ov
 | 5.10 | Receipt rendering + ESC/POS printing behind an adapter; local vs tax-invoice status (D13) | Printer failure never loses or duplicates the sale; receipt number stays stable |
 | 5.11 | Sales history screen with per-sale sync state (D14) | Every sale's status is visible: pending, accepted, rejected, conflict |
 | 5.12 | Reprint tracking (D13) | Reprints are counted and audited |
+
+#### Cashier sessions and the drawer gate (v0.5.0, item 5.2, D10)
+
+§15 demands a cashier session before a sale can exist; Checkpoint 5 demands the whole flow work in
+**airplane mode**. Those pull opposite ways unless the session is itself an offline object — so it
+is one. The till opens and closes its drawer locally (Room `cash_sessions`, migration
+`MIGRATION_7_8`) and the same facts travel as ordinary sync commands, `CashSessionOpen` and
+`CashSessionClose`, through the outbox with their own `commandId`: an offline open survives a
+restart, a replay is a no-op, and the **server referees when they land** (§1.6 rule 3).
+
+- **One drawer per branch.** A second open on the same branch is refused with
+  `SESSION_ALREADY_OPEN` as a named conflict case — two drawers would make the day's cash
+  unreconcilable, and a silent pick would be worse than either.
+- **The count is a reading.** Closing takes what the till physically counted; the **expected**
+  figure is derived server-side from the float plus the cash the drawer actually took (sales
+  tendered in cash — card and M-PESA never entered it). `variance = counted − expected` is
+  recorded with the actor; paid-outs, safe drops and refunds join the derivation in Phase 6.
+- **Every sale names its drawer.** `SalePayloadSchema` requires `cashSessionId`, and posting
+  re-checks it against the drawer's window **on the sale's own clock** — offline sales arrive
+  long after the drawer closes, so posting time proves nothing. `SESSION_REQUIRED`,
+  `SESSION_BRANCH_MISMATCH` and `SESSION_NOT_OPEN` are promoted to the push result with a
+  human-readable message (§6), and a refused sale writes nothing at all.
+- **The gate works offline.** The till caches the user's permission codes at sign-in
+  (`/auth/me` → `SessionStore`) and refuses checkout at the button when the drawer is shut or
+  `pos.sale.create` is missing — naming exactly what is missing. That cache decides only what the
+  **cashier is told**; the server re-checks every permission on push (`cash.shift.open` /
+  `cash.shift.close` / `pos.sale.create`). A device token is never proof of authority.
+
+Documented in `docs/operations/cashier-sessions.md`; 10 tests in `cashier-session.spec.ts` plus
+the two sale suites reworked to open a drawer — **181/181 across 16 suites**.
 
 ### Phase 6 — Cash management, shifts, refunds, end-of-day
 

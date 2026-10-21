@@ -243,3 +243,24 @@ data class ProductPriceOverrideEntity(
     /** Window end (exclusive); null = open-ended. */
     val validToEpochMs: Long? = null,
 )
+
+/**
+ * The drawer (item 5.2, D10). A till cannot sell without one, and it opens and closes HERE first
+ * — offline — before the same facts travel as sync commands; the server is the referee when they
+ * land (one drawer per branch, and the count-vs-expected derivation).
+ */
+@Entity(tableName = "cash_sessions")
+data class CashSessionEntity(
+    @PrimaryKey val id: String,
+    val branchId: String,
+    val deviceId: String,
+    val state: String, // open | closed
+    val openingFloatMinor: Long,
+    /** Server-derived at close: float + cash tendered on this session's sales. */
+    val expectedMinor: Long?,
+    /** What the till physically counted — a reading, never the books. */
+    val countedMinor: Long?,
+    val varianceMinor: Long?,
+    val openedAtEpochMs: Long,
+    val closedAtEpochMs: Long?,
+)

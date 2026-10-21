@@ -16,6 +16,7 @@ describe('price lists + price history (Phase 4, item 4.11)', () => {
   let app: INestApplication;
   let token: string;
   let cashierToken: string;
+  let cashSessionId: string;
   const deviceId = '99999999-9999-4999-8999-999999999994';
   const cashierDeviceId = '99999999-9999-4999-8999-999999999993';
 
@@ -37,6 +38,24 @@ describe('price lists + price history (Phase 4, item 4.11)', () => {
     }
     token = (await request(app.getHttpServer()).post('/v1/auth/login').send({ email: SEED.ownerEmail, password: SEED.password, deviceId })).body.accessToken;
     cashierToken = (await request(app.getHttpServer()).post('/v1/auth/login').send({ email: SEED.cashierEmail, password: SEED.password, deviceId: cashierDeviceId })).body.accessToken;
+
+    // Item 5.2: the stale-price sale below still needs a drawer to belong to.
+    cashSessionId = 'eeeeeeee-0001-4000-8000-0000000000ff';
+    const open = await auth(token, request(app.getHttpServer()).post('/v1/sync/push')).send({
+      commands: [
+        {
+          commandId: 'dddddddd-0001-4000-8000-0000000000ff',
+          branchId: SEED.branchId,
+          deviceId,
+          aggregateType: 'CashSessionOpen',
+          aggregateId: cashSessionId,
+          schemaVersion: 1,
+          payload: { id: cashSessionId, branchId: SEED.branchId, openingFloatMinor: 5000, openedAt: new Date(Date.now() - 60_000).toISOString() },
+        },
+      ],
+    });
+    expect(open.status).toBe(201);
+    expect(open.body.results[0].status).toBe('accepted');
   });
 
   afterAll(async () => {
@@ -185,6 +204,7 @@ describe('price lists + price history (Phase 4, item 4.11)', () => {
         sale: {
           id: saleId,
           localNumber: 'LL-MAIN-9001',
+          cashSessionId,
           currency: 'KES',
           priceSnapshotVersion: 1,
           lines: [

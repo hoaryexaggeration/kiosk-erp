@@ -28,7 +28,8 @@ export const SalePayloadSchema = z.object({
     id: z.string().uuid(),
     localNumber: z.string().max(60).optional(),
     customerId: z.string().uuid().optional(),
-    cashSessionId: z.string().uuid().optional(),
+    // Required since item 5.2 (D10): a sale cannot exist without the drawer it was taken from.
+    cashSessionId: z.string().uuid(),
     currency: z.string().length(3).default('KES'),
     priceSnapshotVersion: z.number().int().nonnegative().optional(),
     clientCreatedAt: z.string().optional(),
@@ -63,3 +64,25 @@ export const SalePayloadSchema = z.object({
   }),
 });
 export type SalePayload = z.infer<typeof SalePayloadSchema>;
+
+/**
+ * Cashier session, item 5.2 (D10). A drawer opens and closes at the till — frequently offline —
+ * so the session travels as commands rather than REST calls; the server is the referee when they
+ * land. The till is offline-authoritative for its own drawer, and its own clock names the window.
+ */
+export const CashSessionOpenSchema = z.object({
+  id: z.string().uuid(),
+  branchId: z.string().uuid(),
+  openingFloatMinor: z.number().int().nonnegative(),
+  openedAt: z.string(),
+  deviceName: z.string().max(120).optional(),
+});
+
+export const CashSessionCloseSchema = z.object({
+  id: z.string().uuid(),
+  countedMinor: z.number().int().nonnegative(),
+  closedAt: z.string(),
+});
+
+export type CashSessionOpenPayload = z.infer<typeof CashSessionOpenSchema>;
+export type CashSessionClosePayload = z.infer<typeof CashSessionCloseSchema>;

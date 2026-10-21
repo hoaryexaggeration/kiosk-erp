@@ -2,6 +2,7 @@ package com.kiosk.erp.core.data.repository
 
 import androidx.room.withTransaction
 import com.kiosk.erp.core.common.Pricing
+import com.kiosk.erp.core.database.CashSessionEntity
 import com.kiosk.erp.core.database.KioskDatabase
 import com.kiosk.erp.core.database.OutboxEntity
 import com.kiosk.erp.core.database.SaleEntity
@@ -54,7 +55,7 @@ class SaleRepository(private val db: KioskDatabase) {
     }
 
     /** Record a cash sale offline. Provisional local receipt number; never recycled (§7, ADR 0006). */
-    suspend fun createCashSale(customerId: String?, lines: List<CartLine>, branchId: String, deviceId: String): CheckoutResult {
+    suspend fun createCashSale(cashSessionId: String, customerId: String?, lines: List<CartLine>, branchId: String, deviceId: String): CheckoutResult {
         require(lines.isNotEmpty()) { "Cart is empty" }
         val saleId = UUID.randomUUID().toString()
         val now = System.currentTimeMillis()
@@ -92,7 +93,8 @@ class SaleRepository(private val db: KioskDatabase) {
             id = saleId,
             localNumber = localNumber,
             customerId = customerId,
-            cashSessionId = null,
+            // The drawer this sale was rung up on (item 5.2): the server refuses a sale without one.
+            cashSessionId = cashSessionId,
             state = "pending_sync",
             currency = "KES",
             subtotalMinor = totals.subtotalMinor,
@@ -109,6 +111,7 @@ class SaleRepository(private val db: KioskDatabase) {
             put("sale", buildJsonObject {
                 put("id", saleId)
                 put("localNumber", localNumber)
+                put("cashSessionId", cashSessionId)
                 if (customerId != null) put("customerId", customerId)
                 put("currency", "KES")
                 put("clientCreatedAt", isoNow())
@@ -163,6 +166,90 @@ class SaleRepository(private val db: KioskDatabase) {
         }
 
         return CheckoutResult(saleId, localNumber, totals.totalMinor)
+    }
+
+    // --- the drawer (item 5.2, D10) ---------------------------------------------------------------
+
+    /** The drawer this branch is trading from right now, or null (observed live by the till). */
+    fun observeOpenSession(branchId: String): Flow<CashSessionEntity?> = db.cashSessionDao().observeOpen(branchId)
+
+    suspend fun openSession(id: String, branchId: String, deviceId: String, openingFloatMinor: Long, openedAtEpochMs: Long): CashSessionEntity {
+        val session = CashSessionEntity(
+            id = id,
+            branchId = branchId,
+            deviceId = deviceId,
+            state = "open",
+            openingFloatMinor = openingFloatMinor,
+            expectedMinor = null,
+            countedMinor = null,
+            varianceMinor = null,
+            openedAtEpochMs = openedAtEpochMs,
+            closedAtEpochMs = null,
+        )
+        val payload = buildJsonObject {
+            put("id", id)
+            put("branchId", branchId)
+            put("openingFloatMinor", openingFloatMinor)
+            put("openedAt", isoAt(openedAtEpochMs))
+        }
+        db.withTransaction {
+            db.cashSessionDao().upsert(session)
+            db.outboxDao().insert(
+                OutboxEntity(
+                    commandId = UUID.randomUUID().toString(),
+                    aggregateType = "CashSessionOpen",
+                    aggregateId = id,
+                    branchId = branchId,
+                    deviceId = deviceId,
+                    payloadJson = payload.toString(),
+                    status = "pending",
+                    attempts = 0,
+                    lastError = null,
+                    conflictCode = null,
+                    createdAtEpochMs = openedAtEpochMs,
+                    syncedAtEpochMs = null,
+                ),
+            )
+        }
+        return session
+    }
+
+    /**
+     * Close the drawer with what the till physically counted. The count is a READING — it lands
+     * locally and travels as a command; the server derives expected and variance itself when the
+     * command arrives, so no device can decide what the books say (§1.6 rule 3).
+     */
+    suspend fun closeSession(session: CashSessionEntity, countedMinor: Long, closedAtEpochMs: Long) {
+        val payload = buildJsonObject {
+            put("id", session.id)
+            put("countedMinor", countedMinor)
+            put("closedAt", isoAt(closedAtEpochMs))
+        }
+        db.withTransaction {
+            db.cashSessionDao().markClosed(session.id, countedMinor, closedAtEpochMs)
+            db.outboxDao().insert(
+                OutboxEntity(
+                    commandId = UUID.randomUUID().toString(),
+                    aggregateType = "CashSessionClose",
+                    aggregateId = session.id,
+                    branchId = session.branchId,
+                    deviceId = session.deviceId,
+                    payloadJson = payload.toString(),
+                    status = "pending",
+                    attempts = 0,
+                    lastError = null,
+                    conflictCode = null,
+                    createdAtEpochMs = closedAtEpochMs,
+                    syncedAtEpochMs = null,
+                ),
+            )
+        }
+    }
+
+    private fun isoAt(epochMs: Long): String {
+        val fmt = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", java.util.Locale.US)
+        fmt.timeZone = java.util.TimeZone.getTimeZone("UTC")
+        return fmt.format(java.util.Date(epochMs))
     }
 
     private fun isoNow(): String {

@@ -10,6 +10,7 @@ describe('sync push/pull — offline cash sale (Phase 3/5)', () => {
   let dbs: DbService;
   let deviceId: string;
   let token: string;
+  let cashSessionId: string;
 
   const auth = (req: request.Test) => req.set('authorization', `Bearer ${token}`);
 
@@ -31,6 +32,25 @@ describe('sync push/pull — offline cash sale (Phase 3/5)', () => {
 
     const login = await request(app.getHttpServer()).post('/v1/auth/login').send({ email: SEED.ownerEmail, password: SEED.password, deviceId });
     token = login.body.accessToken;
+
+    // Item 5.2 (D10): every sale belongs to a drawer. Open one for the whole suite — the window
+    // stays open, so each sale's own clientCreatedAt falls inside it.
+    cashSessionId = 'eeeeeeee-0000-4000-8000-0000000000ff';
+    const open = await auth(request(app.getHttpServer()).post('/v1/sync/push')).send({
+      commands: [
+        {
+          commandId: 'dddddddd-0000-4000-8000-0000000000ff',
+          branchId: SEED.branchId,
+          deviceId,
+          aggregateType: 'CashSessionOpen',
+          aggregateId: cashSessionId,
+          schemaVersion: 1,
+          payload: { id: cashSessionId, branchId: SEED.branchId, openingFloatMinor: 20000, openedAt: new Date(Date.now() - 60_000).toISOString() },
+        },
+      ],
+    });
+    expect(open.status).toBe(201);
+    expect(open.body.results[0].status).toBe('accepted');
   });
 
   afterAll(async () => {
@@ -53,6 +73,7 @@ describe('sync push/pull — offline cash sale (Phase 3/5)', () => {
       sale: {
         id: saleId,
         localNumber: 'LL-MAIN-0001',
+        cashSessionId,
         currency: 'KES',
         priceSnapshotVersion: 1,
         lines: [
@@ -141,6 +162,7 @@ describe('sync push/pull — offline cash sale (Phase 3/5)', () => {
         sale: {
           id: saleId,
           customerId: tightCustomerId,
+          cashSessionId,
           currency: 'KES',
           lines: [{ id: 'bbbbbbbb-0003-4000-8000-000000000003', productId: SEED.productB, sku: 'SKU-002', name: 'Milk 500ml', unit: 'ea', quantity: 1, unitPriceMinor: 5800, taxRateBp: 1600, taxInclusive: true }],
           tenders: [{ id: 'cccccccc-0003-4000-8000-000000000003', method: 'credit', amountMinor: 5800 }],

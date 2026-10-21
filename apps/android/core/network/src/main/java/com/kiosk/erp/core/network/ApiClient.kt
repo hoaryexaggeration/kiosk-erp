@@ -1024,4 +1024,46 @@ class ApiClient {
     suspend fun status(baseUrl: String, token: String): JsonObject = withContext(Dispatchers.IO) {
         get(baseUrl, "sync/status", token).jsonObject
     }
+
+    // --- the drawer and the role gate (item 5.2, D10) ----------------------------------------------
+
+    /**
+     * The signed-in user's permission codes, cached at sign-in so the till can gate itself OFFLINE
+     * (§6). The server re-checks every one of them on the push path regardless — a cached list is
+     * a courtesy to the cashier, never the authority.
+     */
+    suspend fun authMe(baseUrl: String, token: String): List<String> = withContext(Dispatchers.IO) {
+        val response = get(baseUrl, "auth/me", token).jsonObject
+        response["permissions"]?.jsonArray?.mapNotNull { it.jsonPrimitive.contentOrNull } ?: emptyList()
+    }
+
+    /** The drawer this branch is trading from right now, or null. */
+    suspend fun cashSessionCurrent(baseUrl: String, token: String, branchId: String): ServerCashSession? = withContext(Dispatchers.IO) {
+        val response = get(baseUrl, "cash/sessions/current?branchId=$branchId", token).jsonObject
+        val row = response["session"] as? JsonObject ?: return@withContext null
+        ServerCashSession(
+            id = row["id"]?.jsonPrimitive?.content ?: return@withContext null,
+            branchId = row["branchId"]?.jsonPrimitive?.content ?: "",
+            state = row["state"]?.jsonPrimitive?.content ?: "open",
+            openingFloatMinor = row["openingFloatMinor"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0L,
+            countedMinor = row["countedMinor"]?.jsonPrimitive?.contentOrNull?.toLongOrNull(),
+            expectedMinor = row["expectedMinor"]?.jsonPrimitive?.contentOrNull?.toLongOrNull(),
+            varianceMinor = row["varianceMinor"]?.jsonPrimitive?.contentOrNull?.toLongOrNull(),
+            openedAt = row["openedAt"]?.jsonPrimitive?.content ?: "",
+            closedAt = row["closedAt"]?.jsonPrimitive?.contentOrNull,
+        )
+    }
 }
+
+/** The server's view of a drawer session (item 5.2). Money in minor units, timestamps ISO-8601. */
+data class ServerCashSession(
+    val id: String,
+    val branchId: String,
+    val state: String,
+    val openingFloatMinor: Long,
+    val countedMinor: Long?,
+    val expectedMinor: Long?,
+    val varianceMinor: Long?,
+    val openedAt: String,
+    val closedAt: String?,
+)

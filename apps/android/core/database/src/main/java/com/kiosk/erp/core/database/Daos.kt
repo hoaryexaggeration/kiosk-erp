@@ -251,3 +251,27 @@ interface BranchDao {
     @Query("SELECT COUNT(*) FROM branches")
     suspend fun count(): Int
 }
+
+@Dao
+interface CashSessionDao {
+    /** The drawer this branch is trading from right now (item 5.2, D10). */
+    @Query("SELECT * FROM cash_sessions WHERE branchId = :branchId AND state = 'open' ORDER BY openedAtEpochMs DESC LIMIT 1")
+    fun observeOpen(branchId: String): Flow<CashSessionEntity?>
+
+    @Query("SELECT * FROM cash_sessions WHERE branchId = :branchId AND state = 'open' ORDER BY openedAtEpochMs DESC LIMIT 1")
+    suspend fun openNow(branchId: String): CashSessionEntity?
+
+    @Query("SELECT * FROM cash_sessions WHERE id = :id")
+    suspend fun byId(id: String): CashSessionEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(session: CashSessionEntity)
+
+    /**
+     * Closing is BOTH a local truth (the till counted, offline) and a queued command. The count
+     * lands here; the server derives expected/variance itself when the command arrives — a
+     * reading never decides what the books say (§1.6).
+     */
+    @Query("UPDATE cash_sessions SET state = 'closed', closedAtEpochMs = :closedAtEpochMs, countedMinor = :countedMinor WHERE id = :id")
+    suspend fun markClosed(id: String, countedMinor: Long, closedAtEpochMs: Long)
+}

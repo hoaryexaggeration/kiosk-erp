@@ -7,13 +7,16 @@ import com.kiosk.erp.core.data.repository.CartLine
 import com.kiosk.erp.core.data.repository.ProductRepository
 import com.kiosk.erp.core.data.repository.SaleRepository
 import com.kiosk.erp.core.data.session.SessionStore
+import com.kiosk.erp.core.database.CashSessionEntity
 import com.kiosk.erp.core.database.ProductEntity
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import java.util.UUID
 
 /** A transient message for the cashier: `isError` decides whether it reads as a problem or a result. */
 data class PosNotice(val text: String, val isError: Boolean = false)
@@ -36,6 +39,22 @@ class PosViewModel(
 
     private val _notice = MutableStateFlow<PosNotice?>(null)
     val notice: StateFlow<PosNotice?> = _notice
+
+    /**
+     * The drawer this till is trading from (item 5.2, D10). Loaded once from Room — the very
+     * cache the checkout gate reads — and refreshed by open/close; the server referees the
+     * queued commands when the connection returns.
+     */
+    private val _drawer = MutableStateFlow<CashSessionEntity?>(null)
+    val drawer: StateFlow<CashSessionEntity?> = _drawer
+
+    init {
+        viewModelScope.launch {
+            val session = sessionStore.current()
+            val branchId = session.branchId ?: "22222222-2222-4222-8222-222222222222"
+            _drawer.value = saleRepository.observeOpenSession(branchId).first()
+        }
+    }
 
     fun totals(): Pricing.DocumentTotals =
         Pricing.computeDocument(_cart.value.map { Pricing.LineInput(it.unitPriceMinor, it.quantity, it.discountBp, it.taxRateBp, it.taxInclusive) })
@@ -128,12 +147,58 @@ class PosViewModel(
                 _notice.value = PosNotice("The cart is empty — scan or search for an item first.", isError = true)
                 return@launch
             }
-            val result = saleRepository.createCashSale(null, _cart.value, branchId, deviceId)
+            // The drawer gate (item 5.2, D10): a sale must belong to an open session, and the
+            // server refuses one that does not — so the till says so HERE, at the button, rather
+            // than letting a receipt vanish into a rejected sync command.
+            val drawer = _drawer.value
+            if (drawer == null || drawer.state != "open") {
+                _notice.value = PosNotice("Open the drawer first — a sale cannot be recorded without one.", isError = true)
+                return@launch
+            }
+            // The cached role decides what the CASHIER is told; the server re-checks regardless.
+            if (!session.has("pos.sale.create")) {
+                _notice.value = PosNotice("This user cannot create sales (missing permission pos.sale.create).", isError = true)
+                return@launch
+            }
+            val result = saleRepository.createCashSale(drawer.id, null, _cart.value, branchId, deviceId)
             _notice.value = PosNotice(
                 "Receipt ${result.localNumber} · ${Pricing.formatMinor(result.totalMinor)} KES saved on this device. It uploads when the connection is back.",
             )
             _cart.value = emptyList()
             onDone(result.localNumber)
+        }
+    }
+
+    // --- the drawer (item 5.2, D10) ----------------------------------------------------------------
+
+    /** Open the drawer with its float. Offline-first: the row and its command land locally now. */
+    fun openDrawer(openingFloatMinor: Long) {
+        viewModelScope.launch {
+            val session = sessionStore.current()
+            val branchId = session.branchId ?: "22222222-2222-4222-8222-222222222222"
+            val deviceId = session.deviceId ?: "00000000-0000-4000-8000-000000000000"
+            val opened = saleRepository.openSession(
+                id = UUID.randomUUID().toString(),
+                branchId = branchId,
+                deviceId = deviceId,
+                openingFloatMinor = openingFloatMinor,
+                openedAtEpochMs = System.currentTimeMillis(),
+            )
+            _drawer.value = opened
+            _notice.value = PosNotice("Drawer opened · float ${Pricing.formatMinor(openingFloatMinor)} KES")
+        }
+    }
+
+    /**
+     * Close with what the till physically counted. The count is a reading — it is recorded here
+     * and travels as a command; the server derives expected and variance itself when it lands.
+     */
+    fun closeDrawer(countedMinor: Long) {
+        viewModelScope.launch {
+            val drawer = _drawer.value ?: return@launch
+            saleRepository.closeSession(drawer, countedMinor, System.currentTimeMillis())
+            _drawer.value = null
+            _notice.value = PosNotice("Drawer closed · counted ${Pricing.formatMinor(countedMinor)} KES · uploads with the next sync")
         }
     }
 }

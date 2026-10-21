@@ -26,8 +26,9 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         StockTransferEntity::class,
         StockTransferLineEntity::class,
         BranchEntity::class,
+        CashSessionEntity::class,
     ],
-    version = 7,
+    version = 8,
     exportSchema = false,
 )
 abstract class KioskDatabase : RoomDatabase() {
@@ -38,6 +39,7 @@ abstract class KioskDatabase : RoomDatabase() {
     abstract fun inventoryDao(): InventoryDao
     abstract fun transferDao(): TransferDao
     abstract fun branchDao(): BranchDao
+    abstract fun cashSessionDao(): CashSessionDao
 
     companion object {
         /**
@@ -62,7 +64,7 @@ abstract class KioskDatabase : RoomDatabase() {
 
         fun build(context: Context): KioskDatabase =
             Room.databaseBuilder(context, KioskDatabase::class.java, "kiosk-erp.db")
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8)
                 .fallbackToDestructiveMigrationOnDowngrade()
                 .build()
 
@@ -179,6 +181,30 @@ abstract class KioskDatabase : RoomDatabase() {
                         "`priceMinor` INTEGER NOT NULL, " +
                         "`validFromEpochMs` INTEGER NOT NULL, " +
                         "`validToEpochMs` INTEGER, " +
+                        "PRIMARY KEY(`id`))",
+                )
+            }
+        }
+
+        /**
+         * v7 → v8 carries the DRAWER (item 5.2, D10). The till cannot sell without an open
+         * session, and it opens and closes here first — offline — before the same facts travel
+         * as commands the server referees (one drawer per branch; the count is a reading).
+         */
+        val MIGRATION_7_8 = object : Migration(7, 8) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `cash_sessions` (" +
+                        "`id` TEXT NOT NULL, " +
+                        "`branchId` TEXT NOT NULL, " +
+                        "`deviceId` TEXT NOT NULL, " +
+                        "`state` TEXT NOT NULL, " +
+                        "`openingFloatMinor` INTEGER NOT NULL, " +
+                        "`expectedMinor` INTEGER, " +
+                        "`countedMinor` INTEGER, " +
+                        "`varianceMinor` INTEGER, " +
+                        "`openedAtEpochMs` INTEGER NOT NULL, " +
+                        "`closedAtEpochMs` INTEGER, " +
                         "PRIMARY KEY(`id`))",
                 )
             }

@@ -3,6 +3,7 @@ package com.kiosk.erp.core.data.session
 import android.content.Context
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
+import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
@@ -19,9 +20,16 @@ data class Session(
     val email: String?,
     val deviceId: String?,
     val branchId: String?,
+    /**
+     * The signed-in user's permission codes, cached at sign-in so the till can gate itself while
+     * offline (item 5.2). The server re-checks every one of them on the push path regardless —
+     * this list decides what the CASHIER is told, never what the server allows.
+     */
+    val permissions: Set<String> = emptySet(),
 ) {
     val isAuthenticated: Boolean get() = !accessToken.isNullOrBlank()
     val canSync: Boolean get() = isAuthenticated && !deviceId.isNullOrBlank() && !branchId.isNullOrBlank()
+    fun has(permission: String): Boolean = permissions.contains(permission)
 }
 
 /**
@@ -41,6 +49,7 @@ class SessionStore(
         val email = stringPreferencesKey("email")
         val deviceId = stringPreferencesKey("device_id")
         val branchId = stringPreferencesKey("branch_id")
+        val permissions = stringSetPreferencesKey("permissions")
     }
 
     val session: Flow<Session> = context.sessionDataStore.data.map { prefs ->
@@ -53,6 +62,7 @@ class SessionStore(
             email = prefs[Keys.email],
             deviceId = prefs[Keys.deviceId],
             branchId = prefs[Keys.branchId],
+            permissions = prefs[Keys.permissions] ?: emptySet(),
         )
     }
 
@@ -68,6 +78,8 @@ class SessionStore(
             session.email?.let { prefs[Keys.email] = it }
             session.deviceId?.let { prefs[Keys.deviceId] = it }
             session.branchId?.let { prefs[Keys.branchId] = it }
+            // An empty set means "we never learned them" — leave the previous cache untouched.
+            if (session.permissions.isNotEmpty()) prefs[Keys.permissions] = session.permissions
         }
     }
 

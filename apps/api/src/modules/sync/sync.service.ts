@@ -6,9 +6,10 @@ import { AppError, SyncErrorCode } from '../../common/errors';
 import { EventsService } from '../platform/events.service';
 import { AuthService } from '../auth/auth.service';
 import { SaleService } from '../sales/sale.service';
+import { CashService } from '../cash/cash.service';
 import { InventoryService } from '../inventory/inventory.service';
 import { StockAdjustmentSchema, StockReceiptSchema, StockTransferSchema, StocktakeSchema } from '../inventory/inventory.schema';
-import { CommandEnvelope, SalePayloadSchema } from './command.schema';
+import { CashSessionCloseSchema, CashSessionOpenSchema, CommandEnvelope, SalePayloadSchema } from './command.schema';
 import { AuthContext } from '../../common/auth-context';
 
 export interface PushResult {
@@ -25,6 +26,9 @@ const CURRENT_SCHEMA_VERSION = 1;
 /** Permission required to apply each synced aggregate (server-side, never the UI). */
 const REQUIRED_PERMISSION: Record<string, string> = {
   Sale: 'pos.sale.create',
+  // The drawer is a cash object: opening and closing it are the shift permissions (item 5.2).
+  CashSessionOpen: 'cash.shift.open',
+  CashSessionClose: 'cash.shift.close',
   StockReceipt: 'inventory.receive',
   StockAdjustment: 'inventory.adjust',
   // A count produces adjustment movements, so it is held to the permission that writes them (4.8).
@@ -41,6 +45,7 @@ export class SyncService {
     private readonly dbs: DbService,
     private readonly auth: AuthService,
     private readonly saleService: SaleService,
+    private readonly cashService: CashService,
     private readonly inventoryService: InventoryService,
     private readonly events: EventsService,
   ) {}
@@ -175,7 +180,30 @@ export class SyncService {
         return { status: 'rejected', code: 'VALIDATION_ERROR', message: parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ') };
       }
       const applied = await this.saleService.applySale(trx, commandCtx, parsed.data);
-      return { status: applied.status, result: applied.result, conflictCodes: applied.conflictCodes };
+      // A refusal must reach the device with its code and reason (§6): "your drawer was closed"
+      // is actionable, a bare `rejected` is not (item 5.2).
+      return { status: applied.status, result: applied.result, code: applied.code, message: applied.message, conflictCodes: applied.conflictCodes };
+    }
+
+    // The drawer (item 5.2, D10): open and close arrive as commands because both happen at a
+    // till that is very often offline. The server referees the branch, the one-drawer rule and
+    // the counted-vs-expected derivation when they land.
+    if (command.aggregateType === 'CashSessionOpen') {
+      const parsed = CashSessionOpenSchema.safeParse(command.payload);
+      if (!parsed.success) {
+        return { status: 'rejected', code: 'VALIDATION_ERROR', message: parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ') };
+      }
+      const applied = await this.cashService.open(trx, commandCtx, parsed.data);
+      return { status: applied.status, result: applied.result, code: applied.code, message: applied.message, conflictCodes: applied.conflictCodes };
+    }
+
+    if (command.aggregateType === 'CashSessionClose') {
+      const parsed = CashSessionCloseSchema.safeParse(command.payload);
+      if (!parsed.success) {
+        return { status: 'rejected', code: 'VALIDATION_ERROR', message: parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ') };
+      }
+      const applied = await this.cashService.close(trx, commandCtx, parsed.data);
+      return { status: applied.status, result: applied.result, code: applied.code, message: applied.message, conflictCodes: applied.conflictCodes };
     }
 
     if (command.aggregateType === 'StockReceipt') {
